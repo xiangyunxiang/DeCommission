@@ -35,6 +35,11 @@ async function main() {
   await dataFetcher.waitForDeployment();
   console.log("DataFetcher:     ", await dataFetcher.getAddress());
 
+  const platform = await hre.ethers.deployContract("TaskPlatform");
+  await platform.waitForDeployment();
+
+  console.log(`TaskPlatform deployed to: ${await platform.getAddress()}`);
+
   console.log("\n--- All contracts deployed and linked ---");
 }
 
