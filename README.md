@@ -1,6 +1,6 @@
 # DeCommission: Simple Blockchain Task Marketplace
 
-A decentralized task-matching platform about digital art commission where clients can post tasks with ETH rewards, and artists can claim and complete them. This project is a full-stack DApp consisting of a **Solidity** smart contract backend and a **React** frontend.
+A decentralized task-matching platform about digital art commission, where clients can post tasks with ETH rewards, and artists can claim and complete them. This project is a full-stack DApp consisting of a **Solidity** smart contract backend and a **React** frontend.
 
 ## 🏗 Project Structure
 
