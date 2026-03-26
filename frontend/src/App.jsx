@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { ethers } from 'ethers'
 import taskAbi from './contract/TaskPlatform.json'
 import { Wallet, PlusCircle, CheckCircle } from 'lucide-react'
+import import ClientPage from "./pages/ClientPage"
 
 const CONTRACT_ADDRESS = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
 
