@@ -482,10 +482,10 @@ const styles = {
   
   guestDesc: { 
     fontSize: "13px", 
-    color: "rgba(232,230,222,0.6)", // 调成半透明的灰色，拉开视觉层级
-    lineHeight: "1.6",              // 增加行高，让多行文字阅读更舒适
-    marginTop: "12px",              // 往下挤一点，和上面的 Header 拉开距离
-    marginBottom: "16px",           // 往上挤一点，和下面的按钮拉开距离
+    color: "rgba(232,230,222,0.6)", 
+    lineHeight: "1.6",              
+    marginTop: "12px",              
+    marginBottom: "16px",          
   },
   lockedBtn: { width: "100%", marginTop: "12px", padding: "9px", background: "transparent", border: "1px dashed rgba(168,245,212,0.2)", borderRadius: "8px", color: "#a8f5d4", fontSize: "12px", cursor: "pointer" },
   pill: { fontSize: "11px", color: "rgba(232,230,222,0.5)", background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: "20px", padding: "3px 9px" },
