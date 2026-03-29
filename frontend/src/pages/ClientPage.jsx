@@ -479,7 +479,7 @@ export default function ClientPage({ signer, account }) {
                 <div style={styles.orderAmount}>{order.amount} ETH</div>
                 <div style={styles.cidText}>Requirements CID: {order.cid}</div>
 
-                {/* Status 1: In Progress — wait or use demo button */}
+                {/* Status 1: In Progress (wait or can use demo button) */}
                 {order.status === 1 && (
                   <div style={styles.actionBox}>
                     <p style={styles.hintText}>Artist is working on your commission...</p>
@@ -489,7 +489,7 @@ export default function ClientPage({ signer, account }) {
                   </div>
                 )}
 
-                {/* Status 2: Delivered — Client's turn to decide */}
+                {/* Status 2: Delivered & Pending Client Review */}
                 {order.status === 2 && (
                   <div style={styles.actionBox}>
                     <p style={styles.hintText}>
