@@ -64,7 +64,7 @@ const GUEST_LISTINGS = [
 // ─────────────────────────────────────────────────────────────────────────────
 function App() {
 
-  const [account, setAccount]                 = useState("03x")
+  const [account, setAccount]                 = useState(null) // default: null
   const [signer,  setSigner]                  = useState(null)
   const [activeTab, setActiveTab]             = useState("commission") // commission | creation | juror
   const [depositStatus, setDepositStatus]     = useState(null)         // null | "pass" | "insufficient"
