@@ -5,7 +5,7 @@ export const CONTRACT_ADDRESS = "0x_Your contract address is pasted here"
 export const CONTRACT_ABI = [
   // 函数：Client 支付创建订单
   // inputs: listingId (uint256) = Artist 发布的listing编号
-  // payable: 表示调用时要附带 ETH
+  // payable: 调用时要附带 ETH
   "function createOrder(uint256 listingId) payable",
 
   // 函数：Client 确认满意，释放资金给 Artist
