@@ -81,4 +81,8 @@ contract ReviewerRegistry {
     function getPoolSize() external view returns (uint256) {
         return reviewerPool.length;
     }
+
+    function getPool() external view returns (address[] memory) {
+        return reviewerPool;
+    }
 }

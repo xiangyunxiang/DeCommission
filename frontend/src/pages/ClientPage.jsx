@@ -18,8 +18,9 @@
  * ─────────────────────────────────────────────────────────────
  *  - fetchMyOrders       : reads live orders from contract on load
  *  - createListing()     : packages form → fake CID → calls
- *                          contract.createListing(cid) with ETH
- *  - confirmCompletion() : calls contract.approveOrder(orderId)
+ *                          contract.createCommission(cid, price)
+ *                          with ETH escrowed
+ *  - confirmCompletion() : calls contract.confirmReceipt(orderId)
  *                          releases escrowed funds to Artist
  *  - raiseDispute()      : calls contract.raiseDispute(orderId)
  *                          freezes funds, triggers Juror process
@@ -27,56 +28,9 @@
 
 import { useState, useEffect } from "react"
 import { ethers } from "ethers"
-import { CONTRACT_ADDRESS, CONTRACT_ABI } from "../contract/config.js"
+import { CONTRACT_ADDRESS, CONTRACT_ABI, DATA_FETCHER_ADDRESS, DATA_FETCHER_ABI } from "../contract/config.js"
 
-// ─── MODULE 1: Mock artist profiles ───────────────────────────────────────────
-// Hardcoded. To make the platform look active and established.
-const MOCK_ARTISTS = [
-  {
-    id: 1,
-    address: "0x1A2B...3C4D",
-    style: "Cyberpunk / Cel Shading",
-    priceRange: "0.05 – 0.2 ETH",
-    active: "Just now",
-    tags: ["Character Design", "OC"],
-  },
-  {
-    id: 2,
-    address: "0x5E6F...7A8B",
-    style: "Fantasy Realism / Oil-paint",
-    priceRange: "0.1 – 0.5 ETH",
-    active: "1 hour ago",
-    tags: ["Illustration", "DnD"],
-  },
-  {
-    id: 3,
-    address: "0x9C0D...1E2F",
-    style: "Pixel Art / Chibi",
-    priceRange: "0.01 – 0.08 ETH",
-    active: "3 hours ago",
-    tags: ["VTuber", "Pixel"],
-  },
-  {
-    id: 4,
-    address: "0x3A4B...5C6D",
-    style: "Watercolour / Soft Pastel",
-    priceRange: "0.08 – 0.3 ETH",
-    active: "5 hours ago",
-    tags: ["Portrait", "Cover Art"],
-  },
-]
-
-// ─── MODULE 1: Pre-filled history orders ──────────────────────────────────────
-// Hardcoded. To demonstrate the Juror whitelist reputation mechanism
-// without needing 10 real on-chain transactions during the demo.
-// Status 3 = Completed → counts toward Juror eligibility.
-// Status 5 = Closed (dispute) → does NOT count.
-const MOCK_HISTORY_ORDERS = [
-  { id: 9001, amount: "0.12", status: 3, cid: "QmMockAAA111" },
-  { id: 9002, amount: "0.08", status: 3, cid: "QmMockBBB222" },
-  { id: 9003, amount: "0.25", status: 5, cid: "QmMockCCC333" }, // dispute → not counted
-  { id: 9004, amount: "0.15", status: 3, cid: "QmMockDDD444" },
-]
+// ─── Status labels: (none — mock constants removed) ──────────────────────────
 
 // ─── Status labels: Client perspective ────────────────────────────────────────
 const CLIENT_STATUS = {
@@ -96,9 +50,13 @@ export default function ClientPage({ signer, account }) {
   const [loading, setLoading]     = useState(false)
   const [txStatus, setTxStatus]   = useState("")
 
+  // Artists fetched from chain (replaces MOCK_ARTISTS)
+  const [artists, setArtists] = useState([])
+
   // Live orders fetched from the contract
   const [myListings, setMyListings] = useState([])
   const [myOrders, setMyOrders]     = useState([])
+  const [fetchError, setFetchError] = useState(null)
 
   // Create Order form state
   const [formData, setFormData] = useState({
@@ -112,27 +70,76 @@ export default function ClientPage({ signer, account }) {
     price: "0.1",
   })
 
-  // ── MODULE 2: Load orders from chain on mount ────────────────────────────
+  // ── MODULE 2: Load on mount ────────────────────────────────────────────────
   useEffect(() => {
-    if (signer) fetchMyOrders()
+    if (signer) {
+      fetchMyOrders()
+      fetchArtists()
+    }
   }, [signer])
 
   const fetchMyOrders = async () => {
+    setFetchError(null)
+    setLoading(true)
+    try {
+      const fetcher = new ethers.Contract(DATA_FETCHER_ADDRESS, DATA_FETCHER_ABI, signer)
+      // Single call via DataFetcher.getBuyerDashboard — returns all commissions + disputes
+      const dashboard = await fetcher.getBuyerDashboard(account)
+      // Array.from() converts ethers Result proxy to a real JS array before mapping
+      const orders = Array.from(dashboard.commissions).map(p => ({
+        id:          Number(p.id),
+        amount:      ethers.formatEther(p.price),
+        status:      Number(p.status),
+        cid:         p.ipfsHash,
+        deliveryCid: p.deliveryIpfsHash || null,
+        artist:      p.seller,
+      }))
+      setMyOrders(orders)
+
+      // Separate Listed (status 0) orders into the listings view
+      const listed = orders.filter(o => o.status === 0)
+      setMyListings(listed.map(o => ({
+        id:          o.id,
+        description: `Commission #${o.id}`,
+        price:       o.amount,
+        cid:         o.cid,
+        aiTolerance: "",
+        revisions:   "",
+      })))
+    } catch (err) {
+      console.error("fetchMyOrders failed:", err)
+      const msg = err.reason || err.shortMessage || err.message || "Unknown error"
+      setFetchError(msg)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // ── MODULE 2: Fetch active artists from chain ──────────────────────────────
+  // Scans all products to find unique seller addresses + their stats.
+  // No dedicated contract getter needed — derived from product history.
+  const fetchArtists = async () => {
     try {
       const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
-      // ⚠ 查看后端修改 Align function name with your actual contract implementation.
-      // Common patterns: getOrdersByClient(account) / getTicketsByBuyer(account)
-      const raw = await contract.getOrdersByClient(account)
-      const live = raw.map(o => ({
-        id:     Number(o.id),
-        amount: ethers.formatEther(o.price),
-        status: Number(o.state),
-        cid:    o.ipfsHash,
-      }))
-      setMyOrders(live)
+      const total = Number(await contract.getLatestProductId())
+      const sellerMap = {}
+      for (let i = 1; i <= total; i++) {
+        const p = await contract.getProduct(i)
+        const seller = p.seller
+        if (seller === ethers.ZeroAddress) continue
+        if (!sellerMap[seller]) sellerMap[seller] = { completed: 0, total: 0 }
+        sellerMap[seller].total++
+        const status = Number(p.status)
+        if (status === 3 || status === 5) sellerMap[seller].completed++
+      }
+      setArtists(Object.entries(sellerMap).map(([addr, s]) => ({
+        addressFull: addr,
+        address:     addr.slice(0, 6) + "..." + addr.slice(-4),
+        completed:   s.completed,
+        totalOrders: s.total,
+      })))
     } catch (err) {
-      // Contract not deployed yet or function name mismatch — silent in MVP
-      console.warn("fetchMyOrders: contract not ready or ABI mismatch", err.message)
+      console.warn("fetchArtists failed:", err.message)
     }
   }
 
@@ -177,11 +184,11 @@ export default function ClientPage({ signer, account }) {
       const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
       const priceInWei = ethers.parseEther(formData.price)
 
-      // createListing(string cid) payable
+      // createCommission(string ipfsHash, uint256 price) payable
       // The ETH sent = order escrow amount locked by the contract.
       // ⚠ Ensure the user still has ≥ 1 ETH mandatory deposit after this tx.
-      //   The contract should enforce this on-chain; the UI just shows a warning.
-      const tx = await contract.createListing(fakeCID, { value: priceInWei })
+      //   The contract enforces this on-chain; the UI just shows a warning.
+      const tx = await contract.createCommission(fakeCID, priceInWei, { value: priceInWei })
       setTxStatus("⏳ Transaction submitted. Waiting for block confirmation...")
       const receipt = await tx.wait()
 
@@ -197,6 +204,8 @@ export default function ClientPage({ signer, account }) {
 
       setTxStatus(`✅ Order listed on-chain! Tx: ${receipt.hash.slice(0, 14)}...`)
       setFormData(prev => ({ ...prev, description: "", price: "0.1" }))
+      // Re-fetch from chain so real IDs and status are used
+      await fetchMyOrders()
       setActiveTab("orders")
       setOrderTab("listed")
     } catch (err) {
@@ -218,7 +227,7 @@ export default function ClientPage({ signer, account }) {
     setTxStatus("⏳ Waiting for MetaMask confirmation...")
     try {
       const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
-      const tx = await contract.approveOrder(orderId)
+      const tx = await contract.confirmReceipt(orderId)
       await tx.wait()
       setMyOrders(prev => prev.map(o => o.id === orderId ? { ...o, status: 3 } : o))
       setTxStatus("✅ Confirmed! Escrowed funds released to Artist.")
@@ -249,30 +258,9 @@ export default function ClientPage({ signer, account }) {
     }
   }
 
-  // ── MODULE 1: Demo simulation buttons ───────────────────────────────────
-  // These exist for representing the full flow 
-  // without needing a second browser / account to act as Artist.
-  const simulateAccept = (listing) => {
-    setMyOrders(prev => [...prev, { id: listing.id, amount: listing.price, cid: listing.cid, status: 1 }])
-    setMyListings(prev => prev.filter(l => l.id !== listing.id))
-    setTxStatus("🎨 [Demo] Artist accepted the order. >> Status: In Progress")
-    setOrderTab("ongoing")
-  }
-  const simulateDelivery = (orderId) => {
-    setMyOrders(prev => prev.map(o => o.id === orderId ? { ...o, status: 2 } : o))
-    setTxStatus("📦 [Demo] Artist submitted watermarked delivery. >> Status: Pending Review")
-  }
-  const simulateResolveDispute = (orderId) => {
-    setMyOrders(prev => prev.map(o => o.id === orderId ? { ...o, status: 5 } : o))
-    setTxStatus("⚖️ [Demo] Jurors voted. >> Dispute resolved, order closed.")
-    setOrderTab("history")
-  }
-
   // ── Derived lists ────────────────────────────────────────────────────────
-  // Merge live orders with pre-filled mock history for demo richness
-  const allOrders     = [...myOrders, ...MOCK_HISTORY_ORDERS]
-  const ongoingOrders = allOrders.filter(o => [1, 2, 4].includes(o.status))
-  const historyOrders = allOrders.filter(o => [3, 5].includes(o.status))
+  const ongoingOrders = myOrders.filter(o => [1, 2, 4].includes(o.status))
+  const historyOrders = myOrders.filter(o => [3, 5].includes(o.status))
 
   // ─────────────────────────────────────────────────────────────────────────
   // RENDER FUNCTIONS
@@ -280,30 +268,30 @@ export default function ClientPage({ signer, account }) {
 
   const renderBrowse = () => (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
-      {MOCK_ARTISTS.map(artist => (
-        <div key={artist.id} style={styles.card}>
-          <div style={styles.artistAddr}>{artist.address}</div>
-          <span style={styles.activeTag}>● {artist.active}</span>
-          <p style={{ color: "#b4b1a6", fontSize: "14px", margin: "8px 0" }}>
-            {artist.style}
-          </p>
-          <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: "10px" }}>
-            {artist.tags.map(t => (
-              <span key={t} style={styles.pill}>{t}</span>
-            ))}
+      {artists.length === 0
+        ? (
+          <div style={{ ...styles.empty, gridColumn: "1 / -1" }}>
+            {signer
+              ? "No active artists found on chain yet. Artists appear here once they accept at least one commission."
+              : "Connect your wallet to see active artists."}
           </div>
-          <div style={styles.priceLabel}>Est. {artist.priceRange}</div>
-          <button
-            style={{ ...styles.ghostBtn, width: "100%", marginTop: "12px" }}
-            onClick={() => {
-              setFormData(prev => ({ ...prev, style: artist.style }))
-              setActiveTab("create")
-            }}
-          >
-            Create Commission for this Artist →
-          </button>
-        </div>
-      ))}
+        )
+        : artists.map(artist => (
+          <div key={artist.addressFull} style={styles.card}>
+            <div style={styles.artistAddr}>{artist.address}</div>
+            <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", margin: "8px 0 10px" }}>
+              <span style={styles.pill}>✅ {artist.completed} completed</span>
+              <span style={styles.pill}>📦 {artist.totalOrders} total orders</span>
+            </div>
+            <button
+              style={{ ...styles.ghostBtn, width: "100%", marginTop: "4px" }}
+              onClick={() => setActiveTab("create")}
+            >
+              Create Commission →
+            </button>
+          </div>
+        ))
+      }
     </div>
   )
 
@@ -420,6 +408,19 @@ export default function ClientPage({ signer, account }) {
 
   const renderOrders = () => (
     <div style={styles.ordersContainer}>
+      {/* Fetch error banner */}
+      {fetchError && (
+        <div style={styles.fetchErrBanner}>
+          <span>⚠️ Could not load orders: {fetchError}</span>
+          <button style={styles.retryBtn} onClick={() => fetchMyOrders()}>Retry</button>
+        </div>
+      )}
+
+      {/* Loading indicator */}
+      {loading && (
+        <div style={{ color: "#666", fontSize: "13px", marginBottom: "12px" }}>⏳ Loading orders from chain...</div>
+      )}
+
       {/* Sub-tab navigation */}
       <div style={styles.subTabContainer}>
         {[
@@ -453,10 +454,6 @@ export default function ClientPage({ signer, account }) {
                 <p style={{ fontSize: "13px", color: "#aaa", margin: "8px 0" }}>
                   {l.description.substring(0, 70)}...
                 </p>
-                {/* MODULE 1: demo button — lets teacher simulate Artist accepting */}
-                <button style={styles.magicBtn} onClick={() => simulateAccept(l)}>
-                  ✨ [Demo] Simulate Artist accepting this order
-                </button>
               </div>
             ))
           }
@@ -479,13 +476,10 @@ export default function ClientPage({ signer, account }) {
                 <div style={styles.orderAmount}>{order.amount} ETH</div>
                 <div style={styles.cidText}>Requirements CID: {order.cid}</div>
 
-                {/* Status 1: In Progress (wait or can use demo button) */}
+                {/* Status 1: In Progress — waiting for artist to deliver */}
                 {order.status === 1 && (
                   <div style={styles.actionBox}>
                     <p style={styles.hintText}>Artist is working on your commission...</p>
-                    <button style={styles.magicBtn} onClick={() => simulateDelivery(order.id)}>
-                      ✨ [Demo] Simulate Artist submitting watermarked delivery
-                    </button>
                   </div>
                 )}
 
@@ -506,15 +500,12 @@ export default function ClientPage({ signer, account }) {
                   </div>
                 )}
 
-                {/* Status 4: Disputed */}
+                {/* Status 4: Disputed — waiting for jurors to vote */}
                 {order.status === 4 && (
                   <div style={styles.actionBox}>
                     <p style={{ fontSize: "13px", color: "#ff8b8b" }}>
                       Dispute in progress. Jurors are reviewing the evidence...
                     </p>
-                    <button style={styles.magicBtn} onClick={() => simulateResolveDispute(order.id)}>
-                      ✨ [Demo] Simulate Juror vote completion → Close
-                    </button>
                   </div>
                 )}
               </div>
@@ -568,7 +559,11 @@ export default function ClientPage({ signer, account }) {
           <button
             key={t.key}
             style={activeTab === t.key ? styles.activeTab : styles.tab}
-            onClick={() => setActiveTab(t.key)}
+            onClick={() => {
+              setActiveTab(t.key)
+              // Re-fetch when navigating to My Orders so the list is always fresh
+              if (t.key === "orders" && signer) fetchMyOrders()
+            }}
           >
             {t.label}
           </button>
@@ -610,6 +605,8 @@ const styles = {
 
   // Orders
   ordersContainer: { background: "rgba(255,255,255,0.01)", padding: "20px", borderRadius: "14px", border: "1px solid rgba(255,255,255,0.05)" },
+  fetchErrBanner: { display: "flex", alignItems: "center", justifyContent: "space-between", background: "rgba(255,80,80,0.12)", border: "1px solid rgba(255,80,80,0.3)", borderRadius: "8px", padding: "10px 14px", marginBottom: "14px", color: "#ff9999", fontSize: "13px" },
+  retryBtn: { background: "rgba(255,80,80,0.2)", border: "1px solid rgba(255,80,80,0.4)", color: "#ffaaaa", borderRadius: "5px", padding: "4px 12px", cursor: "pointer", fontSize: "12px", fontWeight: "600", marginLeft: "12px" },
   subTabContainer: { display: "flex", gap: "24px", marginBottom: "20px", borderBottom: "1px solid rgba(255,255,255,0.05)", paddingBottom: "12px" },
   subTab: { background: "none", border: "none", color: "#555", fontSize: "14px", cursor: "pointer", padding: "4px 0" },
   activeSubTab: { background: "none", border: "none", color: "#fff", fontSize: "14px", cursor: "pointer", padding: "4px 0", borderBottom: "2px solid #a8f5d4" },
@@ -636,7 +633,7 @@ const styles = {
   // Misc
   pill: { fontSize: "11px", color: "rgba(232,230,222,0.5)", background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "20px", padding: "3px 9px" },
   empty: { color: "#555", fontStyle: "italic", textAlign: "center", padding: "36px 0", fontSize: "14px" },
-  magicBtn: { width: "100%", padding: "9px", background: "rgba(255,255,255,0.03)", border: "1px dashed rgba(255,255,255,0.12)", borderRadius: "8px", color: "#666", cursor: "pointer", fontSize: "12px", marginTop: "10px" },
+  magicBtn: {},  // removed — demo-only buttons deleted
   ghostBtn: { padding: "9px 16px", background: "transparent", color: "rgba(232,230,222,0.5)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "8px", fontSize: "13px", cursor: "pointer" },
   successBtn: { flex: 1, padding: "10px", background: "#a8f5d4", border: "none", borderRadius: "6px", color: "#000", fontWeight: "700", cursor: "pointer" },
   dangerBtn: { flex: 1, padding: "10px", background: "transparent", border: "1px solid rgba(255,139,139,0.4)", borderRadius: "6px", color: "#ff8b8b", cursor: "pointer" },

@@ -15,9 +15,9 @@ contract ProductMarket {
     uint256 private productCounter;
 
     enum ProductStatus {
-        Listed,      // 卖家已上架，等待买家
-        Sold,        // 买家已下单，资金锁定
-        Shipped,     // 卖家已发货
+        Listed,      // 买家已发布委托，等待画师接单
+        Sold,        // 画师已接单，资金锁定
+        Shipped,     // 画师已交付作品
         Completed,   // 买家确认收货，交易完成
         Disputed,    // 争议中
         Resolved     // 争议已解决
@@ -39,8 +39,8 @@ contract ProductMarket {
     mapping(address => uint256) public depositBalance;
     mapping(address => uint256) public activeDisputeCount;
 
-    event ProductListed(uint256 indexed id, address indexed seller, string ipfsHash, uint256 price);
-    event ProductPurchased(uint256 indexed id, address indexed buyer);
+    event CommissionCreated(uint256 indexed id, address indexed buyer, string ipfsHash, uint256 price);
+    event CommissionAccepted(uint256 indexed id, address indexed seller);
     event ProductShipped(uint256 indexed id, string deliveryIpfsHash);
     event ProductCompleted(uint256 indexed id);
     event ProductDisputed(uint256 indexed id, address raisedBy);
@@ -79,21 +79,22 @@ contract ProductMarket {
         emit Withdrawn(msg.sender, amount);
     }
 
-    // ── 商品流程 ───────────────────────────────────────────────────
+    // ── 委托流程 ───────────────────────────────────────────────────
 
-    // 卖家上架商品
-    function listProduct(
+    // 买家发布委托订单（附带 ETH = price，作为托管资金）
+    function createCommission(
         string calldata ipfsHash,
         uint256 price
-    ) external returns (uint256) {
+    ) external payable returns (uint256) {
         require(price > 0, "Price must be greater than 0");
+        require(msg.value == price, "Must send exact price as escrow");
         require(depositBalance[msg.sender] >= MIN_DEPOSIT, "Insufficient deposit: need 1 ETH");
 
         productCounter++;
         products[productCounter] = Product({
             id: productCounter,
-            seller: msg.sender,
-            buyer: address(0),
+            seller: address(0),
+            buyer: msg.sender,
             ipfsHash: ipfsHash,
             deliveryIpfsHash: "",
             price: price,
@@ -101,25 +102,24 @@ contract ProductMarket {
             status: ProductStatus.Listed
         });
 
-        emit ProductListed(productCounter, msg.sender, ipfsHash, price);
+        emit CommissionCreated(productCounter, msg.sender, ipfsHash, price);
         return productCounter;
     }
 
-    // 买家下单购买（附带 ETH = price）
-    function purchaseProduct(uint256 productId) external payable {
+    // 画师接受委托订单
+    function acceptCommission(uint256 productId) external {
         Product storage p = products[productId];
         require(p.status == ProductStatus.Listed, "Not available");
-        require(p.seller != msg.sender, "Seller cannot buy own product");
-        require(msg.value == p.price, "Must send exact price");
+        require(p.buyer != msg.sender, "Buyer cannot accept own commission");
         require(depositBalance[msg.sender] >= MIN_DEPOSIT, "Insufficient deposit: need 1 ETH");
 
-        p.buyer = msg.sender;
+        p.seller = msg.sender;
         p.status = ProductStatus.Sold;
 
-        emit ProductPurchased(productId, msg.sender);
+        emit CommissionAccepted(productId, msg.sender);
     }
 
-    // 卖家确认发货
+    // 画师交付作品
     function confirmShipment(uint256 productId, string calldata deliveryIpfsHash) external {
         Product storage p = products[productId];
         require(msg.sender == p.seller, "Not the seller");
@@ -131,7 +131,7 @@ contract ProductMarket {
         emit ProductShipped(productId, deliveryIpfsHash);
     }
 
-    // 买家确认收货，资金释放给卖家
+    // 买家确认收货，托管资金释放给画师
     function confirmReceipt(uint256 productId) external {
         Product storage p = products[productId];
         require(msg.sender == p.buyer, "Not the buyer");
@@ -144,14 +144,15 @@ contract ProductMarket {
         emit ProductCompleted(productId);
     }
 
-    // 卖家下架（仅 Listed 状态可以）
-    function delistProduct(uint256 productId) external {
+    // 买家取消委托（仅 Listed 状态，即尚无画师接单时可以）
+    function cancelCommission(uint256 productId) external {
         Product storage p = products[productId];
-        require(msg.sender == p.seller, "Not the seller");
-        require(p.status == ProductStatus.Listed, "Cannot delist after purchase");
+        require(msg.sender == p.buyer, "Not the buyer");
+        require(p.status == ProductStatus.Listed, "Cannot cancel after acceptance");
 
-        // 复用 Resolved 状态标记下架（或可单独加 Delisted 状态，为简单起见复用）
         p.status = ProductStatus.Resolved;
+        // 退回托管资金给买家
+        payable(p.buyer).transfer(p.price);
         emit ProductDelisted(productId);
     }
 

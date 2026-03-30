@@ -25,9 +25,9 @@ contract DataFetcher {
     }
 
     // ── 买家 Dashboard ──────────────────────────────────────────
-    // 返回：买家所有购买记录 + 买家相关争议进度
+    // 返回：买家创建的所有委托 + 买家相关争议进度
     struct BuyerDashboard {
-        ProductSummary[] purchases;
+        ProductSummary[] commissions;
         DisputeManager.PartyDisputeView[] disputes;
     }
 
@@ -38,16 +38,16 @@ contract DataFetcher {
         uint256[] memory disputeIds = market.getMyDisputes(buyer);
 
         return BuyerDashboard({
-            purchases: _buildProductSummaries(productIds),
+            commissions: _buildProductSummaries(productIds),
             disputes: dispute.getDisputesByParty(disputeIds)
         });
     }
 
-    // ── 卖家 Dashboard ──────────────────────────────────────────
-    // 返回：全平台在售商品 + 卖家自己的商品 + 卖家相关争议进度
+    // ── 画师 Dashboard ────────────────────────────────────────
+    // 返回：全平台开放委托 + 画师接受的委托 + 画师相关争议进度
     struct SellerDashboard {
-        ProductSummary[] listedProducts;  // 全平台在售（供参考竞品）
-        ProductSummary[] myProducts;      // 自己的所有商品
+        ProductSummary[] openCommissions;  // 全平台开放委托（供画师浏览接单）
+        ProductSummary[] myCommissions;    // 画师已接受的委托
         DisputeManager.PartyDisputeView[] disputes;
     }
 
@@ -59,8 +59,8 @@ contract DataFetcher {
         uint256[] memory disputeIds = market.getMyDisputes(seller);
 
         return SellerDashboard({
-            listedProducts: _buildProductSummaries(listedIds),
-            myProducts: _buildProductSummaries(myIds),
+            openCommissions: _buildProductSummaries(listedIds),
+            myCommissions: _buildProductSummaries(myIds),
             disputes: dispute.getDisputesByParty(disputeIds)
         });
     }
@@ -80,7 +80,7 @@ contract DataFetcher {
         });
     }
 
-    // ── 商品浏览（任何人，无需登录）─────────────────────────────
+    // ── 委托浏览（任何人，无需登录）─────────────────────────────
     function getStorefront() external view returns (ProductSummary[] memory) {
         uint256[] memory listedIds = market.getListedProducts();
         return _buildProductSummaries(listedIds);

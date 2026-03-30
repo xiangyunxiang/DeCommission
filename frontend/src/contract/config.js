@@ -1,31 +1,87 @@
-export const CONTRACT_ADDRESS = "0x_Your contract address is pasted here"
+import addresses from "./deployedAddresses.json"
+import DataFetcherArtifact from "../../../backend/artifacts/contracts/DataFetcher.sol/DataFetcher.json"
 
-//跑完 npx hardhat compile 后
-// 复制后端生成的 JSON 文件里面的 abi 字段
+export const CONTRACT_ADDRESS              = addresses.ProductMarket
+export const REVIEWER_REGISTRY_ADDRESS     = addresses.ReviewerRegistry
+export const DISPUTE_MANAGER_ADDRESS       = addresses.DisputeManager
+export const DATA_FETCHER_ADDRESS          = addresses.DataFetcher
+
+// ProductMarket ABI — matches backend/contracts/ProductMarket.sol
 export const CONTRACT_ABI = [
-  // 函数：Client 支付创建订单
-  // inputs: listingId (uint256) = Artist 发布的listing编号
-  // payable: 调用时要附带 ETH
-  "function createOrder(uint256 listingId) payable",
+  // ── Write functions ────────────────────────────────────────────
 
-  // 函数：Client 确认满意，释放资金给 Artist
-  "function confirmCompletion(uint256 orderId)",
+  // Buyer creates a commission order with ETH escrowed
+  "function createCommission(string calldata ipfsHash, uint256 price) payable returns (uint256)",
 
-  // 函数：Client 发起争议
-  // 调用时需要附带 Client 的押金
-  "function raiseDispute(uint256 orderId) payable",
+  // Artist accepts an open commission
+  "function acceptCommission(uint256 productId)",
 
-  // 读取函数：查看某个订单的详情（纯读取，不花 Gas）
-  // returns: 一个包含订单所有信息的结构体
-  "function orders(uint256) view returns (uint256 id, address client, address artist, uint256 amount, uint8 status)",
+  // Artist submits delivery (watermarked work CID)
+  "function confirmShipment(uint256 productId, string calldata deliveryIpfsHash)",
 
-  // 读取函数：查看所有可接单的 listings
-  "function getActiveListings() view returns (tuple(uint256 id, address artist, string description, uint256 price)[])",
+  // Buyer confirms receipt → releases escrowed funds to artist
+  "function confirmReceipt(uint256 productId)",
 
-  // 事件：订单创建成功时合约会发出这个信号
-  // 前端可以监听它来自动刷新页面
-  "event OrderCreated(uint256 indexed orderId, address indexed client, uint256 amount)",
+  // Buyer cancels an unaccepted commission → refunds escrowed ETH
+  "function cancelCommission(uint256 productId)",
 
-  // 事件：订单完成
-  "event OrderCompleted(uint256 indexed orderId)",
+  // Either party raises a dispute (Sold or Shipped status)
+  "function raiseDispute(uint256 productId)",
+
+  // Deposit / withdraw mandatory deposit
+  "function deposit() payable",
+  "function withdrawDeposit(uint256 amount)",
+
+  // ── Read functions ─────────────────────────────────────────────
+
+  "function getProduct(uint256 productId) view returns (tuple(uint256 id, address seller, address buyer, string ipfsHash, string deliveryIpfsHash, uint256 price, uint256 listedAt, uint8 status))",
+  "function getProductsByBuyer(address buyer) view returns (uint256[])",
+  "function getProductsBySeller(address seller) view returns (uint256[])",
+  "function getListedProducts() view returns (uint256[])",
+  "function getLatestProductId() view returns (uint256)",
+  "function depositBalance(address) view returns (uint256)",
+
+  // ── Events ─────────────────────────────────────────────────────
+
+  "event CommissionCreated(uint256 indexed id, address indexed buyer, string ipfsHash, uint256 price)",
+  "event CommissionAccepted(uint256 indexed id, address indexed seller)",
+  "event ProductShipped(uint256 indexed id, string deliveryIpfsHash)",
+  "event ProductCompleted(uint256 indexed id)",
+  "event ProductDisputed(uint256 indexed id, address raisedBy)",
+  "event ProductDelisted(uint256 indexed id)",
+]
+
+// DisputeManager ABI — matches backend/contracts/DisputeManager.sol
+export const DISPUTE_MANAGER_ABI = [
+  // ── Write functions ────────────────────────────────────────────
+  "function stakeToEnter(uint256 productId) payable",
+  "function withdrawStake(uint256 productId)",
+  "function castVote(uint256 productId, uint8 vote)",
+  "function settleDispute(uint256 productId)",
+
+  // ── Read functions ─────────────────────────────────────────────
+  "function getDisputesByReviewer(address reviewer) view returns (uint256[])",
+  "function getReviewerDisputeDetails(address reviewer) view returns (tuple(uint256 productId, address buyer, address seller, uint256 buyerVotes, uint256 sellerVotes, uint256 deadline, bool resolved, bool buyerWon, uint8 myVote, bool myHasStaked, bool myHasVoted)[])",
+  "function getDisputeInfo(uint256 productId) view returns (address[] assignedReviewers, uint256 buyerVotes, uint256 sellerVotes, uint256 deadline, bool resolved, bool buyerWon)",
+  "function getReviewerStakeStatus(uint256 productId, address reviewer) view returns (bool hasStaked, bool hasVoted)",
+
+  // ── Events ─────────────────────────────────────────────────────
+  "event ReviewerStaked(uint256 indexed productId, address indexed reviewer)",
+  "event ReviewerWithdrew(uint256 indexed productId, address indexed reviewer)",
+  "event VoteCast(uint256 indexed productId, address indexed reviewer, uint8 vote)",
+  "event DisputeResolved(uint256 indexed productId, bool buyerWon, uint256 buyerVotes, uint256 sellerVotes)",
+]
+
+// DataFetcher ABI — imported directly from compiled artifact (avoids manual ABI drift)
+export const DATA_FETCHER_ABI = DataFetcherArtifact.abi
+
+// ReviewerRegistry ABI — for juror pool registration
+export const REVIEWER_REGISTRY_ABI = [
+  "function isReviewer(address) view returns (bool)",
+  "function completedSales(address) view returns (uint256)",
+  "function getPoolSize() view returns (uint256)",
+  "function getPool() view returns (address[])",
+  "function registerAsReviewer()",
+  "function forceRegister(address addr)",
+  "event ReviewerRegistered(address indexed reviewer)",
 ]

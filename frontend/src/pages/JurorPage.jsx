@@ -13,44 +13,32 @@
  * Orders closed via dispute (status 5) do NOT count.
  *
  * ─────────────────────────────────────────────────────────────
- * MODULE 1 · MOCK DATA
+ * REAL CONTRACT CALLS
  * ─────────────────────────────────────────────────────────────
- *  - MOCK_DISPUTES     : 2 pre-filled dispute invitations so the
- *                        page is never empty during the demo
- *  - aiTag             : fake binary 0/1 from "AI detection algo",
- *                        shown as a reference label only
- *  - evidence CIDs     : fake IPFS hashes for watermarked image
- *                        and chat records
- *  - countdown         : real JS setInterval countdown from a
- *                        hardcoded future timestamp
- *
- * ─────────────────────────────────────────────────────────────
- * MODULE 2 · REAL CONTRACT CALLS
- * ─────────────────────────────────────────────────────────────
- *   - payStake(disputeId)                 payable 0.1 ETH
+ *   - fetchDisputes()                     loads assigned disputes from DisputeManager
+ *   - payStake(disputeId)                 payable 0.1 ETH — unlocks evidence access
  *   - castVote(disputeId, supportClient)  no extra ETH (already staked)
- *   - abstainVote(disputeId)              triggers stake refund
- * 
+ *   - abstain(disputeId)                  triggers stake refund via withdrawStake
+ *
  * ─────── Dispute Invitation ────────────────────────────────────────────────
- * In production: contract.getDisputesForJuror(account)
- * MVP: filter MOCK_DISPUTES by a fake "invitedJurors" list that includes the current account.
- * 
+ * DisputeManager.getReviewerDisputeDetails(account) returns all disputes
+ * this reviewer is assigned to, plus their per-dispute stake/vote state.
+ *
  * ─── VOTING STATE MACHINE (per dispute card) ─────────────────
  *   "invited"   Initial state. Juror sees case info but evidence
  *               is locked. Must pay 0.1 ETH stake to proceed.
  *               If deadline passes before staking → card disappears.
  *
- *   "staked"    Stake paid (MODULE 2: stakeDeposit). Evidence
- *               CIDs are now unlocked. Countdown still ticking.
+ *   "staked"    Stake paid. Evidence CIDs are now unlocked.
+ *               Countdown still ticking.
  *               Juror can vote (support Client / Artist) or abstain.
  *
- *   "voted"     Vote cast (MODULE 2: castVote). Card moves to
- *               "Awaiting Verdict" section. Choice is locked.
- *               Stake returned if majority; forfeited if minority.
+ *   "voted"     Vote cast. Card moves to "Awaiting Verdict" section.
+ *               Choice is locked. Stake returned if majority; forfeited if minority.
  *
- *   "abstained" Juror chose to abstain (MODULE 2: abstainVote).
- *               Stake refunded immediately. Card disappears.
- * 
+ *   "abstained" Juror chose to abstain. Stake refunded immediately.
+ *               Card disappears.
+ *
  * ─────── Blind Voting ────────────────────────────────────────────────
  *   Jurors CANNOT see current vote tally or number of participants.
  *   Only evidence files + countdown are visible before voting.
@@ -58,61 +46,9 @@
 
 import { useState, useEffect, useMemo } from "react"
 import { ethers } from "ethers"
-import { CONTRACT_ADDRESS, CONTRACT_ABI } from "../contract/config.js"
+import { CONTRACT_ADDRESS, CONTRACT_ABI, DISPUTE_MANAGER_ADDRESS, DISPUTE_MANAGER_ABI,
+         REVIEWER_REGISTRY_ADDRESS, REVIEWER_REGISTRY_ABI } from "../contract/config.js"
 
-// ─── MODULE 1: Mock dispute invitations ───────────────────────────────────────
-// In production: fetched from contract.getDisputesForJuror(account)
-// aiTag: 0 = "likely human-made", 1 = "AI usage suspected"
-const MOCK_DISPUTES = [
-  {
-    id: 3001,
-    orderId: 101,
-    escrowAmount: "0.15",
-    clientAddr: "0xAABB...1234",
-    artistAddr: "0x9C0D...1E2F",
-    aiTag: 1,                          // AI detection result: suspected
-    aiNote: "Pattern similarity score 0.87 — possible AI base generation detected.",
-    evidenceCids: {
-      watermarkedWork: "QmEvidence001WatermarkXXX",
-      chatLog:         "QmEvidence001ChatLogYYY",
-      artistProcess:   "QmEvidence001ProcessZZZ",
-    },
-    deadlineTs: Date.now() + 1000 * 60 * 5, // 5 minutes from now
-    description: "Client claims the final deliverable was AI-generated despite the 0% AI clause. Artist denies this.",
-  },
-  {
-    id: 3002,
-    orderId: 102,
-    escrowAmount: "0.08",
-    clientAddr: "0xCCDD...5678",
-    artistAddr: "0x1A2B...3C4D",
-    aiTag: 0,                          // AI detection result: likely human
-    aiNote: "No significant AI patterns detected. Confidence: 0.91.",
-    evidenceCids: {
-      watermarkedWork: "QmEvidence002WatermarkAAA",
-      chatLog:         "QmEvidence002ChatLogBBB",
-      artistProcess:   null,           // artist did not upload process files
-    },
-    deadlineTs: Date.now() + 1000 * 60 * 180, // 3 hours from now
-    description: "Client disputes that the delivered style does not match the agreed requirement description in the commission.",
-  },
-]
-
-// Simulates which accounts have been invited (production: from contract)
-const MOCK_INVITED_ACCOUNTS = [
-  "0x03x",          // frontend test acc
-  "placeholder",    // add your test account address here
-]
-
-// ─── Helper: get invitations for this account ─────────────────────────────────
-// Production: const invitations = await contract.getDisputesForJuror(account)
-// MVP: check if account appears in the mock invited list
-const getInvitations = (account) => {
-  if (!account) return []
-  // In real use, replace with on-chain check
-  // For demo: all eligible jurors see all mock disputes
-  return MOCK_DISPUTES
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 export default function JurorPage({ signer, account, completedCount, onPendingCountChange }) {
@@ -134,23 +70,136 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
   const [txStatus, setTxStatus] = useState("")
   const [now, setNow]           = useState(Date.now())
 
+  // Juror pool registration state
+  const [isRegistered, setIsRegistered] = useState(false)
+  const [poolSize, setPoolSize]         = useState(null)
+  const [poolMembers, setPoolMembers]   = useState([])   // full address list
+  const [regLoading, setRegLoading]     = useState(false)
+
   // Real-time countdown ticker
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(timer)
   }, [])
 
-  // Load invitations when eligible
+  // Load invitations when eligible and wallet is connected
   useEffect(() => {
-    if (isEligible && account) {
-      const invitations = getInvitations(account)
-      setDisputes(invitations)
-      // Initialise all to "invited"
-      const init = {}
-      invitations.forEach(d => { init[d.id] = "invited" })
-      setDisputePhase(init)
+    if (isEligible && signer && account) {
+      fetchDisputes()
     }
-  }, [isEligible, account])
+  }, [isEligible, signer, account])
+
+  // Load pool registration status whenever wallet connects
+  useEffect(() => {
+    if (signer && account) fetchRegistrationStatus()
+  }, [signer, account])
+
+  // ── Juror pool registration status ────────────────────────────────────────
+  const fetchRegistrationStatus = async () => {
+    try {
+      const reg = new ethers.Contract(REVIEWER_REGISTRY_ADDRESS, REVIEWER_REGISTRY_ABI, signer)
+      const [registered, members] = await Promise.all([
+        reg.isReviewer(account),
+        reg.getPool(),
+      ])
+      const arr = Array.from(members)
+      setIsRegistered(registered)
+      setPoolSize(arr.length)
+      setPoolMembers(arr)
+    } catch (err) {
+      console.warn("fetchRegistrationStatus failed:", err.message)
+    }
+  }
+
+  // ── Register as juror in the pool ────────────────────────────────────────
+  // Uses forceRegister (no sales requirement) so any account can join in the
+  // local dev environment to populate the pool for dispute testing.
+  const registerAsJuror = async () => {
+    if (!signer) { alert("Connect your wallet first."); return }
+    setRegLoading(true)
+    setTxStatus("⏳ Registering you in the juror pool...")
+    try {
+      const reg = new ethers.Contract(REVIEWER_REGISTRY_ADDRESS, REVIEWER_REGISTRY_ABI, signer)
+      const tx = await reg.forceRegister(account)
+      await tx.wait()
+      setIsRegistered(true)
+      setPoolMembers(prev => [...prev, account])
+      setPoolSize(prev => (prev ?? 0) + 1)
+      setTxStatus("✅ You are now in the juror pool. Pool size updated.")
+    } catch (err) {
+      const msg = err.reason || err.shortMessage || err.message
+      setTxStatus(msg?.includes("Already a reviewer")
+        ? "ℹ️ You are already registered as a juror."
+        : `❌ ${msg}`)
+      if (msg?.includes("Already a reviewer")) {
+        setIsRegistered(true)
+        await fetchRegistrationStatus()
+      }
+    } finally {
+      setRegLoading(false)
+    }
+  }
+
+  // ── Fetch real dispute invitations from chain ────────────────────────────
+  // DisputeManager.getReviewerDisputeDetails(account) returns all disputes
+  // this reviewer is assigned to, plus their per-dispute stake/vote state.
+  // We also load each product to get price + IPFS CIDs.
+  const fetchDisputes = async () => {
+    setLoading(true)
+    try {
+      const dm       = new ethers.Contract(DISPUTE_MANAGER_ADDRESS, DISPUTE_MANAGER_ABI, signer)
+      const market   = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
+      const raw      = await dm.getReviewerDisputeDetails(account)
+
+      const mapped = await Promise.all(Array.from(raw).map(async d => {
+        const productId = Number(d.productId)
+        let product = null
+        try { product = await market.getProduct(productId) } catch (_) {}
+
+        return {
+          id:           productId,
+          orderId:      productId,
+          escrowAmount: product ? ethers.formatEther(product.price) : "?",
+          clientAddr:   d.buyer.slice(0, 6) + "..." + d.buyer.slice(-4),
+          artistAddr:   d.seller.slice(0, 6) + "..." + d.seller.slice(-4),
+          deadlineTs:   Number(d.deadline) * 1000,
+          resolved:     d.resolved,
+          buyerWon:     d.buyerWon,
+          myHasStaked:  d.myHasStaked,
+          myHasVoted:   d.myHasVoted,
+          myVote:       Number(d.myVote),  // 0=None, 1=BuyerWins, 2=SellerWins
+          description:  `Commission #${productId} — review the evidence files below to make your decision.`,
+          evidenceCids: {
+            requirementsCid: product?.ipfsHash         || null,
+            watermarkedWork:  product?.deliveryIpfsHash || null,
+          },
+        }
+      }))
+
+      setDisputes(mapped)
+
+      // Restore per-dispute phase and vote choice from on-chain state
+      const initPhase  = {}
+      const initChoice = {}
+      mapped.forEach(d => {
+        if (d.myHasVoted) {
+          initPhase[d.id]  = "voted"
+          initChoice[d.id] = d.myVote === 1 ? "Client" : "Artist"
+        } else if (d.myHasStaked) {
+          initPhase[d.id]  = "staked"
+        } else {
+          initPhase[d.id]  = "invited"
+        }
+      })
+      setDisputePhase(initPhase)
+      setVoteChoice(initChoice)
+    } catch (err) {
+      console.error("fetchDisputes failed:", err)
+      setTxStatus(`❌ Failed to load disputes: ${err.reason || err.shortMessage || err.message}`)
+    } finally {
+      setLoading(false)
+    }
+  }
 
 
   // ── Helpers ───────────────────────────────────────────────────────────────
@@ -175,9 +224,9 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
     setLoading(true)
     setTxStatus("⏳ Paying 0.1 ETH participation stake to unlock evidence...")
     try {
-      const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
-      // stakeForCase(uint256 disputeId) payable — locks 0.1 ETH, unlocks evidence access
-      const tx = await contract.stakeForCase(disputeId, { value: ethers.parseEther("0.1") })
+      const dm = new ethers.Contract(DISPUTE_MANAGER_ADDRESS, DISPUTE_MANAGER_ABI, signer)
+      // stakeToEnter(uint256 productId) payable — locks 0.1 ETH, unlocks evidence access
+      const tx = await dm.stakeToEnter(disputeId, { value: ethers.parseEther("0.1") })
       await tx.wait()
       setPhase(disputeId, "staked")
       setTxStatus("✅ Stake paid. Evidence files are now accessible.")
@@ -189,15 +238,17 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
   }
 
   // ── MODULE 2: Cast vote (after stake is paid) ─────────────────────────────
+  // DisputeManager Vote enum: 0=None, 1=BuyerWins, 2=SellerWins
   const castVote = async (disputeId, supportClient) => {
     if (!signer) { alert("Please connect your wallet."); return }
     setLoading(true)
     const label = supportClient ? "Client" : "Artist"
     setTxStatus(`⏳ Submitting your vote to support ${label}...`)
     try {
-      const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
-      // castVote(uint256 disputeId, bool supportClient) — no extra ETH; stake already paid
-      const tx = await contract.castVote(disputeId, supportClient)
+      const dm = new ethers.Contract(DISPUTE_MANAGER_ADDRESS, DISPUTE_MANAGER_ABI, signer)
+      // castVote(uint256 productId, Vote vote) — 1=BuyerWins, 2=SellerWins
+      const voteEnum = supportClient ? 1 : 2
+      const tx = await dm.castVote(disputeId, voteEnum)
       await tx.wait()
       setVoteChoice(prev => ({ ...prev, [disputeId]: label }))
       setPhase(disputeId, "voted")
@@ -215,9 +266,9 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
     setLoading(true)
     setTxStatus("⏳ Choosing abstention, stake will be refunded...")
     try {
-      const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
-      // abstainVote(uint256 disputeId) — exits round, triggers 0.1 ETH refund
-      const tx = await contract.abstainVote(disputeId)
+      const dm = new ethers.Contract(DISPUTE_MANAGER_ADDRESS, DISPUTE_MANAGER_ABI, signer)
+      // withdrawStake(uint256 productId) — exits round, triggers 0.1 ETH refund
+      const tx = await dm.withdrawStake(disputeId)
       await tx.wait()
       setPhase(disputeId, "abstained")
       setTxStatus("✅ Abstained. Your 0.1 ETH stake has been refunded.")
@@ -228,10 +279,62 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
     }
   }
 
-  // ─── LOCKED STATE ──────────────────────────────────────────────────────────
+  // ─── JUROR POOL REGISTRATION PANEL (always rendered) ───────────────────────
+  const renderPoolPanel = () => (
+    <div style={styles.poolPanel}>
+      <div style={styles.poolPanelHeader}>
+        <div>
+          <div style={styles.poolPanelTitle}>⚖️ Juror Pool</div>
+          <div style={styles.poolPanelSub}>
+            {poolSize === null
+              ? "Loading pool info..."
+              : `${poolSize} registered — ${poolSize >= 5 ? "✅ enough for disputes" : `⚠️ need ${5 - poolSize} more minimum (5 needed, excluding buyer & seller per dispute)`}`
+            }
+          </div>
+        </div>
+        {isRegistered
+          ? <div style={styles.registeredBadge}>✅ You are in the pool</div>
+          : (
+            <button
+              style={styles.registerBtn}
+              onClick={registerAsJuror}
+              disabled={regLoading || !signer}
+            >
+              {regLoading ? "Registering..." : "Participate as Juror"}
+            </button>
+          )
+        }
+      </div>
+
+      {/* Pool member list */}
+      {poolMembers.length > 0 && (
+        <div style={styles.poolMemberList}>
+          {poolMembers.map((addr, i) => (
+            <div key={addr} style={styles.poolMemberRow}>
+              <span style={styles.poolMemberIndex}>{i + 1}</span>
+              <span style={styles.poolMemberAddr}>{addr}</span>
+              {addr.toLowerCase() === account?.toLowerCase() && (
+                <span style={styles.youBadge}>You</span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <p style={styles.poolPanelNote}>
+        Disputes require 5 randomly selected jurors, excluding the buyer and seller.
+        Switch MetaMask accounts and click “Participate as Juror” for each one to fill the pool.
+        Once assigned to a dispute, a 0.1 ETH stake is required to unlock evidence and vote.
+      </p>
+    </div>
+  )
+
+  // ─── LOCKED STATE ───────────────────────────────────────────────────────────
   if (!isEligible) {
     return (
       <div style={styles.page}>
+        {renderPoolPanel()}
+        {txStatus && <div style={styles.statusBar}>{txStatus}</div>}
         <div style={styles.lockedCard}>
           <div style={styles.lockIcon}>🔒</div>
           <h2 style={styles.lockTitle}>Juror Panel — Locked</h2>
@@ -291,6 +394,8 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
   return (
     <div style={styles.page}>
 
+      {renderPoolPanel()}
+
       {/* Header banner */}
       <div style={styles.jurorHeader}>
         <div>
@@ -341,20 +446,6 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
               </div>
             </div>
 
-            {/* AI tag as reference */}
-            <div style={dispute.aiTag === 1 ? styles.aiTagWarn : styles.aiTagPass}>
-              <span style={styles.aiTagIcon}>{dispute.aiTag === 1 ? "🤖" : "✅"}</span>
-              <div style={styles.aiTagBody}>
-                <div style={styles.aiTagTitle}>
-                  AI Pre-screen: {dispute.aiTag === 1 ? "AI Usage Suspected" : "Likely Human-Made"}
-                </div>
-                <div style={styles.aiTagNote}>{dispute.aiNote}</div>
-                <div style={styles.aiTagDisclaimer}>
-                  This is an automated reference tag only. Your independent judgment takes precedence.
-                </div>
-              </div>
-            </div>
-
             {/* ── Phase 1: Pay stake (invited phase) ── */}
             {phase === "invited" && !expired && (
               <div style={styles.stepBox}>
@@ -388,18 +479,12 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
                       You only can see the watermarked files (such as low-resolution deliverables, preliminary sketches etc).
                     </p>
                     <div style={styles.cidRow}>
+                      <span style={styles.cidLabel}>Requirements CID:</span>
+                      <span style={styles.cidValue}>{dispute.evidenceCids.requirementsCid ?? "Not available"}</span>
+                    </div>
+                    <div style={styles.cidRow}>
                       <span style={styles.cidLabel}>Watermarked delivery:</span>
-                      <span style={styles.cidValue}>{dispute.evidenceCids.watermarkedWork}</span>
-                    </div>
-                    <div style={styles.cidRow}>
-                      <span style={styles.cidLabel}>Chat / order records:</span>
-                      <span style={styles.cidValue}>{dispute.evidenceCids.chatLog}</span>
-                    </div>
-                    <div style={styles.cidRow}>
-                      <span style={styles.cidLabel}>Process files:</span>
-                      <span style={styles.cidValue}>
-                        {dispute.evidenceCids.artistProcess ?? "Not provided"}
-                      </span>
+                      <span style={styles.cidValue}>{dispute.evidenceCids.watermarkedWork ?? "Not submitted yet"}</span>
                     </div>
                     <div style={styles.blindReminder}>
                       🔒 Blind voting is enforced. Vote counts and other Jurors' choices are hidden
@@ -589,4 +674,18 @@ const styles = {
   voteReceipt: { fontSize: "13px", color: "#a8f5d4", marginTop: "4px" },
 
   empty: { color: "#555", textAlign: "center", padding: "60px 0", fontSize: "14px", lineHeight: "1.8" },
+
+  // Juror pool registration panel
+  poolPanel: { background: "rgba(168,245,212,0.04)", border: "1px solid rgba(168,245,212,0.18)", borderRadius: "12px", padding: "18px 22px", marginBottom: "20px" },
+  poolPanelHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "16px" },
+  poolPanelTitle: { fontSize: "14px", fontWeight: "700", color: "#a8f5d4", marginBottom: "4px" },
+  poolPanelSub: { fontSize: "12px", color: "#888" },
+  poolPanelNote: { fontSize: "12px", color: "#555", margin: "12px 0 0", lineHeight: "1.7" },
+  registeredBadge: { fontSize: "12px", color: "#a8f5d4", background: "rgba(168,245,212,0.08)", border: "1px solid rgba(168,245,212,0.25)", borderRadius: "20px", padding: "6px 14px", whiteSpace: "nowrap" },
+  registerBtn: { padding: "9px 18px", background: "#a8f5d4", color: "#0d0d0f", border: "none", borderRadius: "8px", fontSize: "13px", fontWeight: "700", cursor: "pointer", whiteSpace: "nowrap" },
+  poolMemberList: { marginTop: "12px", borderTop: "1px solid rgba(255,255,255,0.05)", paddingTop: "10px", display: "flex", flexDirection: "column", gap: "5px" },
+  poolMemberRow: { display: "flex", alignItems: "center", gap: "10px", fontSize: "12px" },
+  poolMemberIndex: { color: "#555", width: "16px", textAlign: "right", flexShrink: 0 },
+  poolMemberAddr: { color: "#888", fontFamily: "monospace", fontSize: "11px", flex: 1 },
+  youBadge: { fontSize: "10px", color: "#a8f5d4", background: "rgba(168,245,212,0.1)", border: "1px solid rgba(168,245,212,0.2)", borderRadius: "10px", padding: "1px 7px" },
 }
