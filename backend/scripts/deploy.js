@@ -1,4 +1,6 @@
 const hre = require("hardhat");
+const fs = require("fs");
+const path = require("path");
 
 async function main() {
   const [deployer] = await hre.ethers.getSigners();
@@ -34,6 +36,24 @@ async function main() {
   );
   await dataFetcher.waitForDeployment();
   console.log("DataFetcher:     ", await dataFetcher.getAddress());
+
+  const platform = await hre.ethers.deployContract("TaskPlatform");
+  await platform.waitForDeployment();
+
+  console.log(`TaskPlatform deployed to: ${await platform.getAddress()}`);
+
+  // ── Auto-export addresses to frontend ──────────────────────────────────
+  const addresses = {
+    ProductMarket:    await market.getAddress(),
+    ReviewerRegistry: await registry.getAddress(),
+    DisputeManager:   await dispute.getAddress(),
+    DataFetcher:      await dataFetcher.getAddress(),
+    TaskPlatform:     await platform.getAddress(),
+  };
+
+  const configPath = path.resolve(__dirname, "../../frontend/src/contract/deployedAddresses.json");
+  fs.writeFileSync(configPath, JSON.stringify(addresses, null, 2));
+  console.log(`\nAddresses written to: ${configPath}`);
 
   console.log("\n--- All contracts deployed and linked ---");
 }

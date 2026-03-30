@@ -117,34 +117,46 @@ function App() {
 
   // ── MODULE 2: Fetch completed order count from both roles ───────────────
   // Call this after wallet connects. Reads live data from the contract.
-  // ⚠ 对应后端 Align function names with your actual contract implementation.
   const fetchCompletedCount = async (signerObj) => {
     try {
       const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signerObj)
       const addr = await signerObj.getAddress()
 
-      // Fetch all orders from both roles in parallel
-      const [clientOrders, artistOrders] = await Promise.all([
-        contract.getOrdersByClient(addr),   // ⚠ match your contract function name
-        contract.getOrdersByArtist(addr),   // ⚠ match your contract function name
+      // Fetch all product IDs from both buyer and seller roles
+      const [buyerIds, sellerIds] = await Promise.all([
+        contract.getProductsByBuyer(addr),
+        contract.getProductsBySeller(addr),
       ])
 
-      // Count status-3 orders from both sides
-      const clientCompleted = clientOrders.filter(o => Number(o.state) === 3).length
-      const artistCompleted = artistOrders.filter(o => Number(o.state) === 3).length
-      setCompletedCount(clientCompleted + artistCompleted)
+      // Fetch each product and count status-3 (Completed)
+      let count = 0
+      const allIds = [...new Set([...buyerIds.map(Number), ...sellerIds.map(Number)])]
+      for (const id of allIds) {
+        const p = await contract.getProduct(id)
+        if (Number(p.status) === 3) count++
+      }
+      setCompletedCount(count)
     } catch (err) {
       // Contract not deployed yet : use mock value without blocking UI
       console.warn("fetchCompletedCount: using mock value", err.message)
     }
   }
 
+  const disconnectWallet = () => {
+    setAccount(null)
+    setSigner(null)
+    setDepositStatus(null)
+    setActiveTab("commission")
+    setCompletedCount(MOCK_COMPLETED_COUNT)
+    setShowJurorPopup(false)
+  }
+
   const checkMandatoryDeposit = async (signerObj) => {
     setCheckingDeposit(true)
     try {
       const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signerObj)
-      const deposit  = await contract.getDeposit(await signerObj.getAddress())
-      setDepositStatus(parseFloat(ethers.formatEther(deposit)) >= 1.0 ? "pass" : "insufficient")
+      const dep = await contract.depositBalance(await signerObj.getAddress())
+      setDepositStatus(parseFloat(ethers.formatEther(dep)) >= 1.0 ? "pass" : "insufficient")
     } catch {
       // Contract not deployed yet, not block development
       setDepositStatus("pass")
@@ -154,7 +166,7 @@ function App() {
   const stakeDeposit = async () => {
     try {
       const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
-      const tx = await contract.stakeDeposit({ value: ethers.parseEther("1.0") })
+      const tx = await contract.deposit({ value: ethers.parseEther("1.0") })
       await tx.wait()
       setDepositStatus("pass")
     } catch (err) { console.error("Deposit failed", err) }
@@ -166,8 +178,8 @@ function App() {
 
       {/* ── Global header ── */}
       <header style={styles.header}>
-        {/* Logo: clicking goes back to guest view if not connected, stays in dashboard if connected */}
-        <span style={styles.logo}>DeCommission</span>
+        {/* Logo: clicking goes back to home / guest view */}
+        <span style={{...styles.logo, cursor: 'pointer'}} onClick={disconnectWallet}>DeCommission</span>
 
         <div style={styles.headerRight}>
           {account ? (
@@ -193,6 +205,11 @@ function App() {
               <div style={styles.walletTag}>
                 {account.slice(0, 6)}...{account.slice(-4)}
               </div>
+
+              {/* Quit / disconnect */}
+              <button style={styles.quitBtn} onClick={disconnectWallet}>
+                Quit
+              </button>
             </div>
           ) : (
             <button style={styles.connectBtn} onClick={connectWallet}>
@@ -287,18 +304,22 @@ function App() {
             </button>
           </div>
 
-          {/* Dashboard content */}
+          {/* Dashboard content — all three pages stay mounted; CSS hides inactive ones */}
           <div style={styles.dashboardContent}>
-            {activeTab === "commission" && <ClientPage signer={signer} account={account} />}
-            {activeTab === "creation"     && <ArtistPage signer={signer} account={account} />}
-            {activeTab === "juror" && (
+            <div style={{display: activeTab === "commission" ? "block" : "none"}}>
+              <ClientPage signer={signer} account={account} />
+            </div>
+            <div style={{display: activeTab === "creation" ? "block" : "none"}}>
+              <ArtistPage signer={signer} account={account} />
+            </div>
+            <div style={{display: activeTab === "juror" ? "block" : "none"}}>
               <JurorPage
                 signer={signer}
                 account={account}
                 completedCount={completedCount}
-                onPendingCountChange={setPendingJurorCount}  // 
+                onPendingCountChange={setPendingJurorCount}
               />
-            )}
+            </div>
           </div>
         </div>
       )}
@@ -422,6 +443,7 @@ const styles = {
   headerRight: { display: "flex", alignItems: "center", gap: "10px" },
   headerInfo: { display: "flex", alignItems: "center", gap: "10px" },
   walletTag: { padding: "6px 14px", background: "rgba(168,245,212,0.08)", border: "1px solid rgba(168,245,212,0.2)", borderRadius: "20px", fontSize: "12px", color: "#a8f5d4", fontFamily: "monospace" },
+  quitBtn: { padding: "6px 14px", background: "rgba(255,80,80,0.12)", border: "1px solid rgba(255,80,80,0.35)", borderRadius: "20px", fontSize: "12px", color: "#ff6b6b", cursor: "pointer" },
   depositWarn: { fontSize: "12px", color: "#f09595", padding: "4px 10px", background: "rgba(240,149,149,0.1)", border: "1px solid rgba(240,149,149,0.2)", borderRadius: "10px" },
   connectBtn: { padding: "8px 20px", background: "#a8f5d4", color: "#0d0d0f", border: "none", borderRadius: "20px", fontSize: "13px", fontWeight: "700", cursor: "pointer" },
   jurorNotifBtn: { display: "flex", alignItems: "center", gap: "6px", padding: "6px 14px", background: "rgba(226,75,74,0.1)", border: "1px solid rgba(226,75,74,0.25)", borderRadius: "20px", color: "#f09595", fontSize: "12px", fontWeight: "600", cursor: "pointer" },

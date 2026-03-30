@@ -16,11 +16,12 @@
  * ─────────────────────────────────────────────────────────────
  * MODULE 2 · REAL CONTRACT CALLS (ethers.js → MetaMask → chain)
  * ─────────────────────────────────────────────────────────────
- *  - fetchMyOrders()    : reads Artist's live orders from chain
- *  - acceptOrder()      : contract.acceptOrder(listingId)
- *  - deliverOrder()     : contract.submitDelivery(orderId, cid)
+ *  - fetchListings()    : reads open commissions from chain
+ *  - fetchMyOrders()    : reads Artist's accepted orders from chain
+ *  - acceptOrder()      : contract.acceptCommission(productId)
+ *  - deliverOrder()     : contract.confirmShipment(productId, cid)
  *                         fake CID is fine for MVP demo
- *  - raiseDispute()     : contract.raiseDispute(orderId)
+ *  - raiseDispute()     : contract.raiseDispute(productId)
  */
 
 import { useState, useEffect } from "react"
@@ -80,18 +81,11 @@ const formatDeadline = (dateStr) => {
   return `${Math.ceil(days / 30)} months`
 }
 
-// ─── MODULE 1: Mock history orders ────────────────────────────────────────────
-// Shows Juror eligibility counter without needing 10 real transactions.
-const MOCK_HISTORY_ORDERS = [
-  { id: 8001, clientAddr: "0x1111...AAAA", amount: "0.10", status: 3, deliveryCid: "QmDelMock001" },
-  { id: 8002, clientAddr: "0x2222...BBBB", amount: "0.20", status: 3, deliveryCid: "QmDelMock002" },
-  { id: 8003, clientAddr: "0x3333...CCCC", amount: "0.15", status: 5, deliveryCid: "QmDelMock003" }, // dispute
-]
+
 
 // ─── Status labels: Artist perspective ────────────────────────────────────────
 const ARTIST_STATUS = {
-  0: "New Order",        // just accepted, not yet started
-  1: "In Progress",      // actively working
+  1: "In Progress",      // accepted, working on it
   2: "Delivered",        // watermarked work submitted, awaiting Client
   3: "Payment Received", // Client approved, funds released
   4: "In Dispute",       // dispute raised by either party
@@ -111,25 +105,61 @@ export default function ArtistPage({ signer, account }) {
 
   // ── MODULE 2: Load on mount ──────────────────────────────────────────────
   useEffect(() => {
-    // MODULE 1: always show mock listings regardless of wallet
-    setListings(MOCK_LISTINGS)
-    // MODULE 2: load live orders if wallet is connected
-    if (signer) fetchMyOrders()
+    if (signer) {
+      fetchListings()
+      fetchMyOrders()
+    } else {
+      // No wallet: show mock listings for demo
+      setListings(MOCK_LISTINGS)
+    }
   }, [signer])
+
+  const fetchListings = async () => {
+    try {
+      const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
+      const ids = await contract.getListedProducts()
+      const results = []
+      for (const id of ids) {
+        const p = await contract.getProduct(id)
+        results.push({
+          id:          Number(p.id),
+          clientAddr:  p.buyer.slice(0, 6) + "..." + p.buyer.slice(-4),
+          clientFull:  p.buyer,
+          description: `Commission #${Number(p.id)} — view IPFS CID for full requirements`,
+          style:       "",
+          aiTolerance: "",
+          revisions:   "",
+          deadline:    "",
+          price:       ethers.formatEther(p.price),
+          postedAt:    new Date(Number(p.listedAt) * 1000).toLocaleString(),
+          cid:         p.ipfsHash,
+        })
+      }
+      // Show real data from chain (empty list is fine when wallet connected)
+      setListings(results)
+    } catch (err) {
+      console.warn("fetchListings: contract not ready", err.message)
+      setListings(MOCK_LISTINGS)
+    }
+  }
 
   const fetchMyOrders = async () => {
     try {
       const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
-      // ⚠ 对应后端修改 Align with actual contract: getOrdersByArtist(account) or similar
-      const raw = await contract.getOrdersByArtist(account)
-      setMyOrders(raw.map(o => ({
-        id:          Number(o.id),
-        clientAddr:  o.client,
-        amount:      ethers.formatEther(o.price),
-        status:      Number(o.state),
-        cid:         o.ipfsHash,
-        deliveryCid: o.deliveryCid || null,
-      })))
+      const ids = await contract.getProductsBySeller(account)
+      const orders = []
+      for (const id of ids) {
+        const p = await contract.getProduct(id)
+        orders.push({
+          id:          Number(p.id),
+          clientAddr:  p.buyer.slice(0, 6) + "..." + p.buyer.slice(-4),
+          amount:      ethers.formatEther(p.price),
+          status:      Number(p.status),
+          cid:         p.ipfsHash,
+          deliveryCid: p.deliveryIpfsHash || null,
+        })
+      }
+      setMyOrders(orders)
     } catch (err) {
       console.warn("fetchMyOrders: contract not ready or ABI mismatch", err.message)
     }
@@ -142,8 +172,8 @@ export default function ArtistPage({ signer, account }) {
     setTxStatus("⏳ Waiting for MetaMask confirmation...")
     try {
       const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
-      // acceptOrder(uint256 orderId) — no ETH needed; Artist simply commits
-      const tx = await contract.acceptOrder(listing.id)
+      // acceptCommission(uint256 productId) — no ETH needed; Artist simply commits
+      const tx = await contract.acceptCommission(listing.id)
       setTxStatus("⏳ Transaction submitted. Waiting for block confirmation...")
       await tx.wait()
 
@@ -155,10 +185,10 @@ export default function ArtistPage({ signer, account }) {
         amount:      listing.price,
         cid:         listing.cid,
         deliveryCid: null,
-        status:      0, // New Order
+        status:      1, // Sold = In Progress from artist perspective
       }])
       setListings(prev => prev.filter(l => l.id !== listing.id))
-      setTxStatus("✅ Order accepted and recorded on-chain.")
+      setTxStatus("✅ Commission accepted and recorded on-chain.")
       setActiveTab("ongoing")
     } catch (err) {
       setTxStatus(err.code === 4001 ? "Cancelled." : `❌ ${err.message}`)
@@ -180,8 +210,8 @@ export default function ArtistPage({ signer, account }) {
     setTxStatus("⏳ Submitting delivery CID on-chain...")
     try {
       const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
-      // submitDelivery(uint256 orderId, string memory deliveryCid)
-      const tx = await contract.submitDelivery(orderId, fakeCID)
+      // confirmShipment(uint256 productId, string deliveryIpfsHash)
+      const tx = await contract.confirmShipment(orderId, fakeCID)
       await tx.wait()
       setMyOrders(prev =>
         prev.map(o => o.id === orderId ? { ...o, status: 2, deliveryCid: fakeCID } : o)
@@ -200,7 +230,7 @@ export default function ArtistPage({ signer, account }) {
     setTxStatus("⏳ Raising dispute — MetaMask will prompt for the arbitration deposit...")
     try {
       const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
-      // ⚠ 对应后端修改 Confirm exact function signature and deposit amount with backend team
+      // raiseDispute(uint256 productId) — deducts 0.5 ETH from both parties' deposits
       const tx = await contract.raiseDispute(orderId)
       await tx.wait()
       setMyOrders(prev => prev.map(o => o.id === orderId ? { ...o, status: 4 } : o))
@@ -213,9 +243,8 @@ export default function ArtistPage({ signer, account }) {
   }
 
   // ── Derived lists ────────────────────────────────────────────────────────
-  const allOrders     = [...myOrders, ...MOCK_HISTORY_ORDERS]
-  const ongoingOrders = allOrders.filter(o => [0, 1, 2, 4].includes(o.status))
-  const historyOrders = allOrders.filter(o => [3, 5].includes(o.status))
+  const ongoingOrders = myOrders.filter(o => [1, 2, 4].includes(o.status))
+  const historyOrders = myOrders.filter(o => [3, 5].includes(o.status))
 
   // ─────────────────────────────────────────────────────────────────────────
   // RENDER FUNCTIONS
@@ -256,13 +285,19 @@ export default function ArtistPage({ signer, account }) {
               >
                 {expandedId === listing.id ? "Collapse ↑" : "View Details ↓"}
               </button>
-              <button
-                style={styles.primaryBtn}
-                onClick={() => acceptOrder(listing)}
-                disabled={loading}
-              >
-                {loading ? "Processing..." : `Accept Order (${listing.price} ETH) →`}
-              </button>
+              {listing.clientFull?.toLowerCase() === account?.toLowerCase()
+                ? (
+                  <div style={styles.ownOrderBadge}>Your Order — Cannot Accept</div>
+                ) : (
+                  <button
+                    style={styles.primaryBtn}
+                    onClick={() => acceptOrder(listing)}
+                    disabled={loading}
+                  >
+                    {loading ? "Processing..." : `Accept Order (${listing.price} ETH) →`}
+                  </button>
+                )
+              }
             </div>
 
             {expandedId === listing.id && (
@@ -300,26 +335,6 @@ export default function ArtistPage({ signer, account }) {
             </div>
 
             <div style={styles.cidText}>Requirements CID: {order.cid}</div>
-
-            {/* Status 0: New Order (No on-chain call needed) */}
-            {order.status === 0 && (
-              <div style={styles.actionBox}>
-                <p style={styles.hintText}>
-                  Order confirmed on-chain. Please start working. No transacted funds happen until delivery.
-                </p>
-                {/* MODULE 1: local state update only, no contract call */}
-                <button
-                  style={styles.magicBtn}
-                  onClick={() =>
-                    setMyOrders(prev =>
-                      prev.map(o => o.id === order.id ? { ...o, status: 1 } : o)
-                    )
-                  }
-                >
-                  ✨ [Demo] Mark as In Progress (local state only)
-                </button>
-              </div>
-            )}
 
             {/* Status 1: In Progress (Submit watermarked delivery) */}
             {order.status === 1 && (
@@ -477,6 +492,7 @@ const styles = {
   // 
   
   primaryBtn: { padding: "10px 20px", background: "#a8f5d4", color: "#0d0d0f", border: "none", borderRadius: "8px", fontSize: "13px", fontWeight: "700", cursor: "pointer", whiteSpace: "nowrap" },
+  ownOrderBadge: { padding: "10px 16px", background: "rgba(255,255,255,0.04)", color: "rgba(232,230,222,0.35)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "8px", fontSize: "12px", fontStyle: "italic", whiteSpace: "nowrap" },
   ghostBtn: { padding: "10px 16px", background: "transparent", color: "rgba(232,230,222,0.5)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "8px", fontSize: "13px", cursor: "pointer" },
   deliverBtn: { width: "100%", padding: "12px", background: "rgba(168,245,212,0.1)", border: "1px solid rgba(168,245,212,0.3)", borderRadius: "8px", color: "#a8f5d4", fontSize: "13px", fontWeight: "700", cursor: "pointer" },
   dangerBtn: { width: "100%", padding: "10px", background: "transparent", border: "1px solid rgba(255,139,139,0.35)", borderRadius: "8px", color: "#ff8b8b", fontSize: "13px", cursor: "pointer" },

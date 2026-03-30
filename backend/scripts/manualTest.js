@@ -71,31 +71,25 @@ async function main() {
   section("1. 押金系统测试");
   // ════════════════════════════════════════════════════════════
   // 预期结果：
-  //   - 押金不足时卖家无法上架商品
-  //   - 押金不足时买家无法购买商品
+  //   - 押金不足时买家无法创建委托
+  //   - 押金不足时画师无法接受委托
   //   - 双方充值后可以正常操作
   //   - 无争议时可以随时提取押金
 
-  // 押金不足时无法上架
-  await expectRevert(
-    market.connect(seller).listProduct("QmHash", hre.ethers.parseEther("0.1")),
-    "Insufficient deposit: need 1 ETH"
-  );
-
-  // 卖家充值后上架
-  await market.connect(seller).deposit({ value: hre.ethers.parseEther("1.0") });
-  await market.connect(seller).listProduct("QmHash", hre.ethers.parseEther("0.1"));
-
-  // 押金不足时无法购买
-  await expectRevert(
-    market.connect(buyer).purchaseProduct(1, { value: hre.ethers.parseEther("0.1") }),
-    "Insufficient deposit: need 1 ETH"
-  );
-
-  // 买家充值后可以正常购买
+  // 买家充值
   await market.connect(buyer).deposit({ value: hre.ethers.parseEther("1.0") });
-  await market.connect(buyer).purchaseProduct(1, { value: hre.ethers.parseEther("0.1") });
-  pass("买卖双方各存 1 ETH 押金后可以正常上架/购买");
+
+  // 押金不足时画师无法接受委托 (先由买家创建)
+  await market.connect(buyer).createCommission("QmHash", hre.ethers.parseEther("0.1"), { value: hre.ethers.parseEther("0.1") });
+  await expectRevert(
+    market.connect(seller).acceptCommission(1),
+    "Insufficient deposit: need 1 ETH"
+  );
+
+  // 画师充值后可以正常接受
+  await market.connect(seller).deposit({ value: hre.ethers.parseEther("1.0") });
+  await market.connect(seller).acceptCommission(1);
+  pass("买卖双方各存 1 ETH 押金后可以正常创建/接受委托");
   info(`Buyer deposit: ${hre.ethers.formatEther(await market.depositBalance(buyer.address))} ETH`);
   info(`Seller deposit: ${hre.ethers.formatEther(await market.depositBalance(seller.address))} ETH`);
 
@@ -108,48 +102,42 @@ async function main() {
   info(`Before: ${hre.ethers.formatEther(beforeWithdraw)} ETH → After: ${hre.ethers.formatEther(afterWithdraw)} ETH`);
 
   // ════════════════════════════════════════════════════════════
-  section("2. 商品生命周期测试（正常完成流程）");
+  section("2. 委托生命周期测试（正常完成流程）");
   // ════════════════════════════════════════════════════════════
   // 预期结果：
   //   Listed(0) → Sold(1) → Shipped(2) → Completed(3)
-  //   卖家在买家确认收货后收到商品款
+  //   画师在买家确认收货后收到委托款
   //   成交记录 +1，满10笔后可以注册为评审员
 
   const c2 = await deploy();
   await c2.market.connect(c2.buyer).deposit({ value: hre.ethers.parseEther("1.0") });
   await c2.market.connect(c2.seller).deposit({ value: hre.ethers.parseEther("1.0") });
 
-  // 卖家上架商品
-  await c2.market.connect(c2.seller).listProduct("QmProductHash", hre.ethers.parseEther("0.5"));
+  // 买家创建委托
+  await c2.market.connect(c2.buyer).createCommission("QmProductHash", hre.ethers.parseEther("0.5"), { value: hre.ethers.parseEther("0.5") });
   let p = await c2.market.getProduct(1);
-  pass(`卖家上架商品，状态: ${p.status} (0=已上架)`);
+  pass(`买家创建委托，状态: ${p.status} (0=已发布)`);
   info(`IPFS hash: QmProductHash | 价格: ${hre.ethers.formatEther(p.price)} ETH`);
 
-  // 卖家不能买自己的商品
+  // 买家不能接受自己的委托
   await expectRevert(
-    c2.market.connect(c2.seller).purchaseProduct(1, { value: hre.ethers.parseEther("0.5") }),
-    "Seller cannot buy own product"
+    c2.market.connect(c2.buyer).acceptCommission(1),
+    "Buyer cannot accept own commission"
   );
 
-  // 买家发送错误金额
-  await expectRevert(
-    c2.market.connect(c2.buyer).purchaseProduct(1, { value: hre.ethers.parseEther("0.1") }),
-    "Must send exact price"
-  );
-
-  // 买家下单购买
-  await c2.market.connect(c2.buyer).purchaseProduct(1, { value: hre.ethers.parseEther("0.5") });
+  // 画师接受委托
+  await c2.market.connect(c2.seller).acceptCommission(1);
   p = await c2.market.getProduct(1);
-  pass(`买家下单购买，状态: ${p.status} (1=已售出)`);
-  info(`Buyer: ${p.buyer}`);
+  pass(`画师接受委托，状态: ${p.status} (1=已接单)`);
+  info(`Seller: ${p.seller}`);
 
-  // 卖家确认发货
+  // 画师交付作品
   await c2.market.connect(c2.seller).confirmShipment(1, "QmShipmentHash");
   p = await c2.market.getProduct(1);
-  pass(`卖家确认发货，状态: ${p.status} (2=已发货)`);
+  pass(`画师交付作品，状态: ${p.status} (2=已交付)`);
   info(`Shipment IPFS hash: QmShipmentHash`);
 
-  // 买家确认收货，卖家收款
+  // 买家确认收货，画师收款
   const sellerBefore = await hre.ethers.provider.getBalance(c2.seller.address);
   await c2.market.connect(c2.buyer).confirmReceipt(1);
   const sellerAfter = await hre.ethers.provider.getBalance(c2.seller.address);
@@ -157,76 +145,76 @@ async function main() {
   pass(`买家确认收货，状态: ${p.status} (3=已完成)`);
   info(`Seller ETH gained: ${hre.ethers.formatEther(sellerAfter - sellerBefore)} ETH`);
 
-  // 完成后卖家成交记录+1
+  // 完成后画师成交记录+1
   const sales = await c2.registry.completedSales(c2.seller.address);
-  pass(`卖家成交记录+1，当前: ${sales} 笔（满10笔可注册为评审员）`);
+  pass(`画师成交记录+1，当前: ${sales} 笔（满10笔可注册为评审员）`);
 
   // ════════════════════════════════════════════════════════════
-  section("3. 卖家下架测试");
+  section("3. 买家取消委托测试");
   // ════════════════════════════════════════════════════════════
   // 预期结果：
-  //   - Listed 状态可以下架
-  //   - 已购买（Sold 或之后）不能下架
+  //   - Listed 状态可以取消
+  //   - 已被接受（Sold 或之后）不能取消
 
   const c3 = await deploy();
   await c3.market.connect(c3.seller).deposit({ value: hre.ethers.parseEther("1.0") });
   await c3.market.connect(c3.buyer).deposit({ value: hre.ethers.parseEther("1.0") });
 
-  await c3.market.connect(c3.seller).listProduct("QmHash1", hre.ethers.parseEther("0.1"));
-  await c3.market.connect(c3.seller).listProduct("QmHash2", hre.ethers.parseEther("0.2"));
+  await c3.market.connect(c3.buyer).createCommission("QmHash1", hre.ethers.parseEther("0.1"), { value: hre.ethers.parseEther("0.1") });
+  await c3.market.connect(c3.buyer).createCommission("QmHash2", hre.ethers.parseEther("0.2"), { value: hre.ethers.parseEther("0.2") });
 
-  // 未被购买可以下架
-  await c3.market.connect(c3.seller).delistProduct(1);
+  // 未被接受可以取消
+  await c3.market.connect(c3.buyer).cancelCommission(1);
   const p3 = await c3.market.getProduct(1);
-  pass(`未被购买的商品可以下架，状态: ${p3.status} (5=已下架)`);
+  pass(`未被接受的委托可以取消，状态: ${p3.status} (5=已取消)`);
 
-  // 已购买不能下架
-  await c3.market.connect(c3.buyer).purchaseProduct(2, { value: hre.ethers.parseEther("0.2") });
+  // 已被接受不能取消
+  await c3.market.connect(c3.seller).acceptCommission(2);
   await expectRevert(
-    c3.market.connect(c3.seller).delistProduct(2),
-    "Cannot delist after purchase"
+    c3.market.connect(c3.buyer).cancelCommission(2),
+    "Cannot cancel after acceptance"
   );
 
   // ════════════════════════════════════════════════════════════
   section("4. Dashboard 查询测试");
   // ════════════════════════════════════════════════════════════
   // 预期结果：
-  //   - 买家 Dashboard 显示所有购买记录 + 相关争议
-  //   - 卖家 Dashboard 显示全平台在售商品 + 自己所有商品 + 相关争议
-  //   - Storefront 只显示 Listed 状态的商品
+  //   - 买家 Dashboard 显示所有创建的委托 + 相关争议
+  //   - 画师 Dashboard 显示全平台开放委托 + 自己接受的委托 + 相关争议
+  //   - Storefront 只显示 Listed 状态的委托
 
   const c4 = await deploy();
   await c4.market.connect(c4.buyer).deposit({ value: hre.ethers.parseEther("1.0") });
   await c4.market.connect(c4.seller).deposit({ value: hre.ethers.parseEther("1.0") });
 
-  await c4.market.connect(c4.seller).listProduct("QmHash1", hre.ethers.parseEther("0.1"));
-  await c4.market.connect(c4.seller).listProduct("QmHash2", hre.ethers.parseEther("0.2"));
-  await c4.market.connect(c4.buyer).purchaseProduct(1, { value: hre.ethers.parseEther("0.1") });
+  await c4.market.connect(c4.buyer).createCommission("QmHash1", hre.ethers.parseEther("0.1"), { value: hre.ethers.parseEther("0.1") });
+  await c4.market.connect(c4.buyer).createCommission("QmHash2", hre.ethers.parseEther("0.2"), { value: hre.ethers.parseEther("0.2") });
+  await c4.market.connect(c4.seller).acceptCommission(1);
 
-  // Storefront（所有人可见的在售商品）
+  // Storefront（所有人可见的开放委托）
   const storefront = await c4.dataFetcher.getStorefront();
-  pass(`Storefront: 在售商品 ${storefront.length} 个（Product #2，#1 已售出）`);
-  info(`Product #${storefront[0].id}: 价格=${hre.ethers.formatEther(storefront[0].price)} ETH`);
+  pass(`Storefront: 开放委托 ${storefront.length} 个（Commission #2，#1 已被接受）`);
+  info(`Commission #${storefront[0].id}: 价格=${hre.ethers.formatEther(storefront[0].price)} ETH`);
 
   // 买家 Dashboard
   const buyerDash = await c4.dataFetcher.getBuyerDashboard(c4.buyer.address);
-  pass(`买家 Dashboard: 共 ${buyerDash.purchases.length} 个购买记录`);
-  const statusMap = ["已上架", "已售出", "已发货", "已完成", "争议中", "已解决"];
-  for (const item of buyerDash.purchases) {
-    info(`Product #${item.id}: 状态=${statusMap[item.status]} | 价格=${hre.ethers.formatEther(item.price)} ETH`);
+  pass(`买家 Dashboard: 共 ${buyerDash.commissions.length} 个委托`);
+  const statusMap = ["已发布", "已接单", "已交付", "已完成", "争议中", "已解决"];
+  for (const item of buyerDash.commissions) {
+    info(`Commission #${item.id}: 状态=${statusMap[item.status]} | 价格=${hre.ethers.formatEther(item.price)} ETH`);
   }
 
-  // 卖家 Dashboard
+  // 画师 Dashboard
   const sellerDash = await c4.dataFetcher.getSellerDashboard(c4.seller.address);
-  pass(`卖家 Dashboard: 平台在售 ${sellerDash.listedProducts.length} 个，我的商品共 ${sellerDash.myProducts.length} 个`);
-  info(`Listed: Product #${sellerDash.listedProducts[0]?.id}`);
-  info(`My products: #${sellerDash.myProducts[0]?.id}, #${sellerDash.myProducts[1]?.id}`);
+  pass(`画师 Dashboard: 平台开放 ${sellerDash.openCommissions.length} 个，我接受的委托共 ${sellerDash.myCommissions.length} 个`);
+  info(`Open: Commission #${sellerDash.openCommissions[0]?.id}`);
+  info(`My commissions: #${sellerDash.myCommissions[0]?.id}`);
 
   // ════════════════════════════════════════════════════════════
   section("5. 争议触发条件测试");
   // ════════════════════════════════════════════════════════════
   // 预期结果：
-  //   - Listed 状态（未购买）不能发起争议
+  //   - Listed 状态（未被接受）不能发起争议
   //   - 局外人不能发起争议
   //   - Sold 状态买卖双方均可发起争议
   //   - Shipped 状态买卖双方均可发起争议
@@ -234,16 +222,18 @@ async function main() {
   const c5 = await deploy();
   await c5.market.connect(c5.buyer).deposit({ value: hre.ethers.parseEther("1.0") });
   await c5.market.connect(c5.seller).deposit({ value: hre.ethers.parseEther("1.0") });
-  await c5.market.connect(c5.seller).listProduct("QmHash", hre.ethers.parseEther("0.1"));
+  await c5.market.connect(c5.buyer).createCommission("QmHash", hre.ethers.parseEther("0.1"), { value: hre.ethers.parseEther("0.1") });
 
   // Listed 状态不能发起争议
   await expectRevert(
-    c5.market.connect(c5.seller).raiseDispute(1),
+    c5.market.connect(c5.buyer).raiseDispute(1),
     "Can only dispute after purchase"
   );
 
+  // 画师接受委托
+  await c5.market.connect(c5.seller).acceptCommission(1);
+
   // 陌生人不能发起争议
-  await c5.market.connect(c5.buyer).purchaseProduct(1, { value: hre.ethers.parseEther("0.1") });
   await expectRevert(
     c5.market.connect(c5.stranger).raiseDispute(1),
     "Not involved in this product"
@@ -258,18 +248,18 @@ async function main() {
   const c5b = await deploy();
   await c5b.market.connect(c5b.buyer).deposit({ value: hre.ethers.parseEther("1.0") });
   await c5b.market.connect(c5b.seller).deposit({ value: hre.ethers.parseEther("1.0") });
-  await c5b.market.connect(c5b.seller).listProduct("QmHash", hre.ethers.parseEther("0.1"));
-  await c5b.market.connect(c5b.buyer).purchaseProduct(1, { value: hre.ethers.parseEther("0.1") });
+  await c5b.market.connect(c5b.buyer).createCommission("QmHash", hre.ethers.parseEther("0.1"), { value: hre.ethers.parseEther("0.1") });
+  await c5b.market.connect(c5b.seller).acceptCommission(1);
   await c5b.market.connect(c5b.seller).raiseDispute(1);
   let p5b = await c5b.market.getProduct(1);
-  pass(`Sold 状态卖家也可以发起争议，状态: ${p5b.status} (4=争议中)`);
+  pass(`Sold 状态画师也可以发起争议，状态: ${p5b.status} (4=争议中)`);
 
   // Shipped 状态也可以发起争议
   const c5c = await deploy();
   await c5c.market.connect(c5c.buyer).deposit({ value: hre.ethers.parseEther("1.0") });
   await c5c.market.connect(c5c.seller).deposit({ value: hre.ethers.parseEther("1.0") });
-  await c5c.market.connect(c5c.seller).listProduct("QmHash", hre.ethers.parseEther("0.1"));
-  await c5c.market.connect(c5c.buyer).purchaseProduct(1, { value: hre.ethers.parseEther("0.1") });
+  await c5c.market.connect(c5c.buyer).createCommission("QmHash", hre.ethers.parseEther("0.1"), { value: hre.ethers.parseEther("0.1") });
+  await c5c.market.connect(c5c.seller).acceptCommission(1);
   await c5c.market.connect(c5c.seller).confirmShipment(1, "QmDelivery");
   await c5c.market.connect(c5c.buyer).raiseDispute(1);
   let p5c = await c5c.market.getProduct(1);
@@ -287,8 +277,8 @@ async function main() {
   const c6 = await deploy();
   await c6.market.connect(c6.buyer).deposit({ value: hre.ethers.parseEther("1.0") });
   await c6.market.connect(c6.seller).deposit({ value: hre.ethers.parseEther("1.0") });
-  await c6.market.connect(c6.seller).listProduct("QmHash", hre.ethers.parseEther("0.1"));
-  await c6.market.connect(c6.buyer).purchaseProduct(1, { value: hre.ethers.parseEther("0.1") });
+  await c6.market.connect(c6.buyer).createCommission("QmHash", hre.ethers.parseEther("0.1"), { value: hre.ethers.parseEther("0.1") });
+  await c6.market.connect(c6.seller).acceptCommission(1);
 
   // 发起争议后双方押金各扣 0.5 ETH
   await c6.market.connect(c6.buyer).raiseDispute(1);
@@ -304,24 +294,24 @@ async function main() {
     "Cannot withdraw during active dispute"
   );
 
-  // 押金不足时无法上架新商品（卖家押金只剩 0.5 ETH）
-  await c6.market.connect(c6.seller).listProduct("QmHash2", hre.ethers.parseEther("0.1")).then(
+  // 押金不足时无法创建新委托（买家押金只剩 0.5 ETH）
+  await c6.market.connect(c6.buyer).createCommission("QmHash2", hre.ethers.parseEther("0.1"), { value: hre.ethers.parseEther("0.1") }).then(
     () => fail("应该失败但成功了"),
-    () => pass("争议扣款后押金不足(0.5 ETH)，无法上架新商品")
+    () => pass("争议扣款后押金不足(0.5 ETH)，无法创建新委托")
   );
 
-  // 押金不足时无法购买（买家押金只剩 0.5 ETH）
-  await c6.market.connect(c6.seller).deposit({ value: hre.ethers.parseEther("0.5") }); // 卖家先补充上架
-  await c6.market.connect(c6.seller).listProduct("QmHash2", hre.ethers.parseEther("0.1"));
-  await c6.market.connect(c6.buyer).purchaseProduct(2, { value: hre.ethers.parseEther("0.1") }).then(
+  // 押金不足时无法接受委托（画师押金只剩 0.5 ETH）
+  await c6.market.connect(c6.buyer).deposit({ value: hre.ethers.parseEther("0.5") }); // 买家先补充创建
+  await c6.market.connect(c6.buyer).createCommission("QmHash2", hre.ethers.parseEther("0.1"), { value: hre.ethers.parseEther("0.1") });
+  await c6.market.connect(c6.seller).acceptCommission(2).then(
     () => fail("应该失败但成功了"),
-    () => pass("争议扣款后押金不足(0.5 ETH)，无法购买新商品")
+    () => pass("争议扣款后押金不足(0.5 ETH)，无法接受新委托")
   );
 
   // 补充押金后可以继续
-  await c6.market.connect(c6.buyer).deposit({ value: hre.ethers.parseEther("0.5") });
-  await c6.market.connect(c6.buyer).purchaseProduct(2, { value: hre.ethers.parseEther("0.1") });
-  pass("补充押金至 1 ETH 后可以正常购买新商品");
+  await c6.market.connect(c6.seller).deposit({ value: hre.ethers.parseEther("0.5") });
+  await c6.market.connect(c6.seller).acceptCommission(2);
+  pass("补充押金至 1 ETH 后可以正常接受新委托");
 
   // ════════════════════════════════════════════════════════════
   section("7. 争议完整流程 — 买家赢");
@@ -337,8 +327,8 @@ async function main() {
   const c7 = await deploy();
   await c7.market.connect(c7.buyer).deposit({ value: hre.ethers.parseEther("1.0") });
   await c7.market.connect(c7.seller).deposit({ value: hre.ethers.parseEther("1.0") });
-  await c7.market.connect(c7.seller).listProduct("QmHash", hre.ethers.parseEther("0.1"));
-  await c7.market.connect(c7.buyer).purchaseProduct(1, { value: hre.ethers.parseEther("0.1") });
+  await c7.market.connect(c7.buyer).createCommission("QmHash", hre.ethers.parseEther("0.1"), { value: hre.ethers.parseEther("0.1") });
+  await c7.market.connect(c7.seller).acceptCommission(1);
   await c7.market.connect(c7.buyer).raiseDispute(1);
 
   const info7 = await c7.dispute.getDisputeInfo(1);
@@ -418,8 +408,8 @@ async function main() {
   const c8 = await deploy();
   await c8.market.connect(c8.buyer).deposit({ value: hre.ethers.parseEther("1.0") });
   await c8.market.connect(c8.seller).deposit({ value: hre.ethers.parseEther("1.0") });
-  await c8.market.connect(c8.seller).listProduct("QmHash", hre.ethers.parseEther("0.1"));
-  await c8.market.connect(c8.buyer).purchaseProduct(1, { value: hre.ethers.parseEther("0.1") });
+  await c8.market.connect(c8.buyer).createCommission("QmHash", hre.ethers.parseEther("0.1"), { value: hre.ethers.parseEther("0.1") });
+  await c8.market.connect(c8.seller).acceptCommission(1);
   await c8.market.connect(c8.buyer).raiseDispute(1);
 
   const info8 = await c8.dispute.getDisputeInfo(1);
@@ -477,8 +467,8 @@ async function main() {
   const c9 = await deploy();
   await c9.market.connect(c9.buyer).deposit({ value: hre.ethers.parseEther("1.0") });
   await c9.market.connect(c9.seller).deposit({ value: hre.ethers.parseEther("1.0") });
-  await c9.market.connect(c9.seller).listProduct("QmHash", hre.ethers.parseEther("0.1"));
-  await c9.market.connect(c9.buyer).purchaseProduct(1, { value: hre.ethers.parseEther("0.1") });
+  await c9.market.connect(c9.buyer).createCommission("QmHash", hre.ethers.parseEther("0.1"), { value: hre.ethers.parseEther("0.1") });
+  await c9.market.connect(c9.seller).acceptCommission(1);
   await c9.market.connect(c9.buyer).raiseDispute(1);
 
   const info9 = await c9.dispute.getDisputeInfo(1);
@@ -518,8 +508,8 @@ async function main() {
   const c10 = await deploy();
   await c10.market.connect(c10.buyer).deposit({ value: hre.ethers.parseEther("1.0") });
   await c10.market.connect(c10.seller).deposit({ value: hre.ethers.parseEther("1.0") });
-  await c10.market.connect(c10.seller).listProduct("QmHash", hre.ethers.parseEther("0.1"));
-  await c10.market.connect(c10.buyer).purchaseProduct(1, { value: hre.ethers.parseEther("0.1") });
+  await c10.market.connect(c10.buyer).createCommission("QmHash", hre.ethers.parseEther("0.1"), { value: hre.ethers.parseEther("0.1") });
+  await c10.market.connect(c10.seller).acceptCommission(1);
   await c10.market.connect(c10.buyer).raiseDispute(1);
 
   const info10 = await c10.dispute.getDisputeInfo(1);
