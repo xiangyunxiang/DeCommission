@@ -9,28 +9,47 @@ contract DisputeManager {
     ProductMarket public market;
 
     uint256 public constant VOTING_PERIOD = 1 days;
-    uint256 public constant REVIEWER_COUNT = 5;
-    uint256 public constant REVIEWER_STAKE = 0.1 ether;
-    uint256 public constant DISPUTE_STAKE = 0.5 ether;
-    uint256 public constant PLATFORM_FEE = 0.1 ether;
+
+    // 动态分级参数（按订单金额）
+    // Tier 1 (Small):  price < 1 ETH   → 3 jurors, 0.05 ETH 质押
+    // Tier 2 (Medium): 1 ETH <= price < 5 ETH → 5 jurors, 0.10 ETH 质押
+    // Tier 3 (Large):  price >= 5 ETH  → 7 jurors, 0.20 ETH 质押
+    uint256 public constant TIER1_THRESHOLD = 1 ether;
+    uint256 public constant TIER2_THRESHOLD = 5 ether;
+
+    uint256 public constant TIER1_REVIEWER_COUNT = 3;
+    uint256 public constant TIER2_REVIEWER_COUNT = 5;
+    uint256 public constant TIER3_REVIEWER_COUNT = 7;
+
+    uint256 public constant TIER1_REVIEWER_STAKE = 0.05 ether;
+    uint256 public constant TIER2_REVIEWER_STAKE = 0.10 ether;
+    uint256 public constant TIER3_REVIEWER_STAKE = 0.20 ether;
+
+    uint256 public constant TIER1_PLATFORM_FEE = 0.02 ether;
+    uint256 public constant TIER2_PLATFORM_FEE = 0.05 ether;
+    uint256 public constant TIER3_PLATFORM_FEE = 0.10 ether;
 
     enum Vote { None, BuyerWins, SellerWins }
 
     struct ReviewerInfo {
-        bool hasStaked;
-        bool hasVoted;
-        Vote vote;
+        bool hasStaked;   // 是否已质押进入
+        bool hasVoted;    // 是否已投票
+        Vote vote;        // 投的票
     }
 
     struct Dispute {
         uint256 productId;
         address buyer;
         address seller;
+        uint256 orderPrice;       // 订单金额，用于确定tier参数
+        uint256 reviewerCount;    // 本次争议的juror人数
+        uint256 reviewerStake;    // 本次争议每个juror的质押金额
+        uint256 platformFee;      // 本次争议的平台费
         address[] assignedReviewers;
         mapping(address => ReviewerInfo) reviewerInfo;
         uint256 buyerVotes;
         uint256 sellerVotes;
-        uint256 stakedReviewerCount;
+        uint256 stakedReviewerCount;  // 已质押进入的评审员数
         uint256 deadline;
         bool resolved;
         bool buyerWon;
@@ -40,6 +59,7 @@ contract DisputeManager {
     mapping(address => uint256[]) private reviewerDisputes;
     mapping(address => uint256) public reviewerEarnings;
 
+    // 平台收益
     uint256 public platformBalance;
 
     event DisputeOpened(uint256 indexed productId, address[] reviewers);
@@ -54,11 +74,41 @@ contract DisputeManager {
         market = ProductMarket(payable(_market));
     }
 
+    // ── 分级查询工具函数（供前端查询juror需质押多少）──────────────────
+
+    function getTier(uint256 price) public pure returns (uint256) {
+        if (price < TIER1_THRESHOLD) return 1;
+        if (price < TIER2_THRESHOLD) return 2;
+        return 3;
+    }
+
+    function getReviewerCountForPrice(uint256 price) public pure returns (uint256) {
+        uint256 tier = getTier(price);
+        if (tier == 1) return TIER1_REVIEWER_COUNT;
+        if (tier == 2) return TIER2_REVIEWER_COUNT;
+        return TIER3_REVIEWER_COUNT;
+    }
+
+    function getReviewerStakeForPrice(uint256 price) public pure returns (uint256) {
+        uint256 tier = getTier(price);
+        if (tier == 1) return TIER1_REVIEWER_STAKE;
+        if (tier == 2) return TIER2_REVIEWER_STAKE;
+        return TIER3_REVIEWER_STAKE;
+    }
+
+    function getPlatformFeeForPrice(uint256 price) public pure returns (uint256) {
+        uint256 tier = getTier(price);
+        if (tier == 1) return TIER1_PLATFORM_FEE;
+        if (tier == 2) return TIER2_PLATFORM_FEE;
+        return TIER3_PLATFORM_FEE;
+    }
+
     function openDispute(
         uint256 productId,
         address buyer,
         address seller,
-        bool /*aiUsageAllowed - unused in product marketplace*/
+        bool /*aiUsageAllowed - unused in product marketplace*/,
+        uint256 orderPrice
     ) external {
         require(msg.sender == address(market), "Only market contract");
 
@@ -66,10 +116,14 @@ contract DisputeManager {
         d.productId = productId;
         d.buyer = buyer;
         d.seller = seller;
+        d.orderPrice = orderPrice;
+        d.reviewerCount = getReviewerCountForPrice(orderPrice);
+        d.reviewerStake = getReviewerStakeForPrice(orderPrice);
+        d.platformFee = getPlatformFeeForPrice(orderPrice);
         d.deadline = block.timestamp + VOTING_PERIOD;
 
-        // 随机assign 5个评审员，排除买卖双方
-        d.assignedReviewers = registry.selectReviewers(buyer, seller, REVIEWER_COUNT);
+        // 随机assign评审员，排除买卖双方
+        d.assignedReviewers = registry.selectReviewers(buyer, seller, d.reviewerCount);
         for (uint i = 0; i < d.assignedReviewers.length; i++) {
             reviewerDisputes[d.assignedReviewers[i]].push(productId);
         }
@@ -82,7 +136,7 @@ contract DisputeManager {
         Dispute storage d = disputes[productId];
         require(!d.resolved, "Already resolved");
         require(block.timestamp < d.deadline, "Voting period ended");
-        require(msg.value == REVIEWER_STAKE, "Must stake exactly 0.1 ETH");
+        require(msg.value == d.reviewerStake, "Incorrect stake amount");
 
         bool isAssigned = false;
         for (uint i = 0; i < d.assignedReviewers.length; i++) {
@@ -111,7 +165,7 @@ contract DisputeManager {
         d.reviewerInfo[msg.sender].hasStaked = false;
         d.stakedReviewerCount--;
 
-        payable(msg.sender).transfer(REVIEWER_STAKE);
+        payable(msg.sender).transfer(d.reviewerStake);
         emit ReviewerWithdrew(productId, msg.sender);
     }
 
@@ -154,13 +208,14 @@ contract DisputeManager {
                 if (ri.hasStaked && !ri.hasVoted) {
                     ri.hasStaked = false;
                     d.stakedReviewerCount--;
-                    payable(r).transfer(REVIEWER_STAKE);
+                    payable(r).transfer(d.reviewerStake);
                 }
+                // 已投票的评审员：重置投票状态，但质押留着进入下一轮
                 ri.hasVoted = false;
                 ri.vote = Vote.None;
             }
 
-            d.assignedReviewers = registry.selectReviewers(d.buyer, d.seller, REVIEWER_COUNT);
+            d.assignedReviewers = registry.selectReviewers(d.buyer, d.seller, d.reviewerCount);
             for (uint i = 0; i < d.assignedReviewers.length; i++) {
                 reviewerDisputes[d.assignedReviewers[i]].push(productId);
             }
@@ -175,8 +230,9 @@ contract DisputeManager {
 
         Vote winningVote = buyerWon ? Vote.BuyerWins : Vote.SellerWins;
 
-        // 奖金池 = 输家的 0.5 ETH 质押 + 投错票评审员的质押
-        uint256 prizePool = DISPUTE_STAKE;
+        // 奖金池 = 输家的 dispute stake + 投错票评审员的质押
+        uint256 disputeStake = market.getDisputeStakeForPrice(d.orderPrice);
+        uint256 prizePool = disputeStake;
 
         uint256 correctVoterCount = 0;
         for (uint i = 0; i < d.assignedReviewers.length; i++) {
@@ -186,38 +242,47 @@ contract DisputeManager {
                 if (ri.vote == winningVote) {
                     correctVoterCount++;
                 } else {
-                    prizePool += REVIEWER_STAKE;
+                    // 只有投错票才没收质押进奖金池
+                    prizePool += d.reviewerStake;
                 }
             }
         }
 
-        uint256 actualPlatformFee = prizePool >= PLATFORM_FEE ? PLATFORM_FEE : prizePool;
+        // 扣除平台费
+        uint256 actualPlatformFee = prizePool >= d.platformFee ? d.platformFee : prizePool;
         platformBalance += actualPlatformFee;
         uint256 remainingPrize = prizePool - actualPlatformFee;
 
+        // 每个投对票的评审员的分成
         uint256 rewardPerCorrectVoter = correctVoterCount > 0
             ? remainingPrize / correctVoterCount
             : 0;
 
+        // 发放评审员奖励（退回质押 + 分成）
         for (uint i = 0; i < d.assignedReviewers.length; i++) {
             address r = d.assignedReviewers[i];
             ReviewerInfo storage ri = d.reviewerInfo[r];
             if (ri.hasStaked) {
                 if (ri.hasVoted && ri.vote == winningVote) {
-                    uint256 payout = REVIEWER_STAKE + rewardPerCorrectVoter;
+                    // 投对票：退回质押 + 分奖金
+                    uint256 payout = d.reviewerStake + rewardPerCorrectVoter;
                     reviewerEarnings[r] += rewardPerCorrectVoter;
                     payable(r).transfer(payout);
                 } else if (!ri.hasVoted) {
-                    payable(r).transfer(REVIEWER_STAKE);
+                    // 质押了但没投票：退回质押，无惩罚
+                    payable(r).transfer(d.reviewerStake);
                 }
-                // 投错票：质押没收进奖金池
+                // 投错票：什么都不退，质押已进奖金池
             }
         }
 
-        uint256 buyerStakeReturn = buyerWon ? DISPUTE_STAKE : 0;
-        uint256 sellerStakeReturn = buyerWon ? 0 : DISPUTE_STAKE;
+        // 通知 ProductMarket 结算订单金额和双方质押
+        // 赢家：退回 disputeStake；输家：质押已进奖金池，退 0
+        uint256 buyerStakeReturn = buyerWon ? disputeStake : 0;
+        uint256 sellerStakeReturn = buyerWon ? 0 : disputeStake;
 
-        (bool sent, ) = address(market).call{value: DISPUTE_STAKE}("");
+        // 把赢家的质押金转给 market 合约，让它一起付给赢家
+        (bool sent, ) = address(market).call{value: disputeStake}("");
         require(sent, "Failed to send stake to market");
 
         market.resolveByDispute(productId, buyerWon, buyerStakeReturn, sellerStakeReturn);
@@ -225,6 +290,8 @@ contract DisputeManager {
         emit DisputeResolved(productId, buyerWon, d.buyerVotes, d.sellerVotes);
     }
 
+    // ── 平台提款 ──────────────────────────────────────────────────
+    // demo 用，实际应该加 owner 权限控制
     function withdrawPlatformFee(address to) external {
         uint256 amount = platformBalance;
         platformBalance = 0;
@@ -237,6 +304,9 @@ contract DisputeManager {
         uint256 productId;
         address buyer;
         address seller;
+        uint256 orderPrice;
+        uint256 reviewerCount;
+        uint256 reviewerStake;
         uint256 buyerVotes;
         uint256 sellerVotes;
         uint256 deadline;
@@ -268,6 +338,9 @@ contract DisputeManager {
                 productId: ids[i],
                 buyer: d.buyer,
                 seller: d.seller,
+                orderPrice: d.orderPrice,
+                reviewerCount: d.reviewerCount,
+                reviewerStake: d.reviewerStake,
                 buyerVotes: d.buyerVotes,
                 sellerVotes: d.sellerVotes,
                 deadline: d.deadline,
@@ -307,6 +380,7 @@ contract DisputeManager {
 
     function getDisputeInfo(uint256 productId) external view returns (
         address[] memory assignedReviewers,
+        uint256 reviewerStake,
         uint256 buyerVotes,
         uint256 sellerVotes,
         uint256 deadline,
@@ -316,6 +390,7 @@ contract DisputeManager {
         Dispute storage d = disputes[productId];
         return (
             d.assignedReviewers,
+            d.reviewerStake,
             d.buyerVotes,
             d.sellerVotes,
             d.deadline,
