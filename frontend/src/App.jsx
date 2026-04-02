@@ -72,6 +72,14 @@ function App() {
   // Juror
   const [showJurorPopup, setShowJurorPopup]   = useState(false)
   const [pendingJurorCount, setPendingJurorCount] = useState(MOCK_JUROR_INVITATIONS)
+  //Wallet
+  const [walletBalance, setWalletBalance]     = useState(null)  // ETH in MetaMask
+  const [contractDeposit, setContractDeposit] = useState(null)  // ETH in contract
+  const [showWalletPanel, setShowWalletPanel] = useState(false) // wallet dropdown
+  const [depositAmount, setDepositAmount]     = useState("1.0") // user-editable
+  const [withdrawAmount, setWithdrawAmount]   = useState("")    // user-editable
+  const [walletTxStatus, setWalletTxStatus]   = useState("")
+
 
   // ── Juror eligibility count ─────────────────────────────────────────────
   // Combines completed orders from BOTH roles for this wallet address.
@@ -163,13 +171,58 @@ function App() {
     } finally { setCheckingDeposit(false) }
   }
 
-  const stakeDeposit = async () => {
+  // ── Fetch MetaMask balance + contract deposit for wallet panel ──────────
+  const fetchWalletInfo = async () => {
+    try {
+      const provider = new ethers.BrowserProvider(window.ethereum)
+      const rawBal   = await provider.getBalance(account)
+      setWalletBalance(parseFloat(ethers.formatEther(rawBal)).toFixed(4))
+      const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
+      const dep      = await contract.depositBalance(account)
+      setContractDeposit(parseFloat(ethers.formatEther(dep)).toFixed(4))
+    } catch (err) {
+      console.warn("fetchWalletInfo failed", err.message)
+    }
+  }
+
+  // ── Deposit any amount into contract ─────────────────────────────────────
+  // Contract: deposit() external payable — adds to depositBalance[msg.sender]
+  // Minimum to use the platform: 1 ETH (enforced on-chain by MIN_DEPOSIT)
+  const DepositToContract = async () => {
+    if (!depositAmount || parseFloat(depositAmount) <= 0) return
+    setWalletTxStatus("⏳ Depositing...")
     try {
       const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
-      const tx = await contract.deposit({ value: ethers.parseEther("1.0") })
+      const tx = await contract.deposit({ value: ethers.parseEther(depositAmount) })
       await tx.wait()
-      setDepositStatus("pass")
-    } catch (err) { console.error("Deposit failed", err) }
+      await checkMandatoryDeposit(signer)  // re-check threshold
+      await fetchWalletInfo()              // refresh panel numbers
+      setWalletTxStatus(`✅ ${depositAmount} ETH deposited.`)
+      setDepositAmount("1.0")
+    } catch (err) {
+      console.warn("fetchWalletInfo failed", err.message)
+    }
+  }
+
+  // ── Withdraw any amount from contract deposit ─────────────────────────────
+  // Contract: withdrawDeposit(uint256 amount) — fails if activeDisputeCount > 0
+  const WithdrawDeposit = async () => {
+    if (!withdrawAmount || parseFloat(withdrawAmount) <= 0) return
+    setWalletTxStatus("⏳ Withdrawing...")
+    try {
+      const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
+      const tx = await contract.withdrawDeposit(ethers.parseEther(withdrawAmount))
+      await tx.wait()
+      await checkMandatoryDeposit(signer)
+      await fetchWalletInfo()
+      setWalletTxStatus(`✅ ${withdrawAmount} ETH withdrawn to your wallet!`)
+      setWithdrawAmount("")
+    } catch (err) {
+      const msg = err.reason || err.shortMessage || err.message
+      setWalletTxStatus(msg?.includes("active dispute")
+        ? "⚠️ Cannot withdraw while you have an active dispute."
+        : err.code === 4001 ? "Cancelled." : `❌ ${msg}`)
+    }
   }
 
   // ─── RENDER ────────────────────────────────────────────────────────────────
@@ -201,9 +254,92 @@ function App() {
                 </button>
               )}
 
-              {/* Wallet address */}
-              <div style={styles.walletTag}>
-                {account.slice(0, 6)}...{account.slice(-4)}
+              {/* Wallet button: click to toggle balance panel */}
+              <div style={{ position: "relative" }}>
+                <button
+                  style={styles.walletTag}
+                  onClick={() => {
+                    setShowWalletPanel(p => !p)
+                    setWalletTxStatus("")
+                    fetchWalletInfo()
+                  }}
+                >
+                  {account.slice(0, 6)}...{account.slice(-4)} ▾
+                </button>
+
+                {showWalletPanel && (
+                  <div style={styles.walletPanel}>
+                    <div style={styles.walletPanelTitle}>Wallet</div>
+
+                    {/* Balance rows */}
+                    <div style={styles.walletRow}>
+                      <span style={styles.walletLabel}>MetaMask balance</span>
+                      <span style={styles.walletValue}>
+                        {walletBalance !== null ? `${walletBalance} ETH` : "—"}
+                      </span>
+                    </div>
+                    <div style={styles.walletRow}>
+                      <span style={styles.walletLabel}>Decommission deposit</span>
+                      <span style={{
+                        ...styles.walletValue,
+                        color: contractDeposit !== null && parseFloat(contractDeposit) >= 1
+                          ? "#a8f5d4" : "#f09595"
+                      }}>
+                        {contractDeposit !== null ? `${contractDeposit} ETH` : "—"}
+                      </span>
+                    </div>
+
+                    <div style={styles.walletDivider} />
+
+                    {/* Deposit input */}
+                    <div style={styles.walletLabel}>Deposit ETH into platform</div>
+                    <div style={styles.walletInputRow}>
+                      <input
+                        type="number"
+                        min="0.01"
+                        step="0.1"
+                        value={depositAmount}
+                        onChange={e => setDepositAmount(e.target.value)}
+                        style={styles.walletInput}
+                        placeholder="Amount"
+                      />
+                      <button style={styles.walletActionBtn} onClick={DepositToContract}>
+                        Deposit
+                      </button>
+                    </div>
+
+                    {/* Withdraw input */}
+                    <div style={{ ...styles.walletLabel, marginTop: "10px" }}>
+                      Withdraw ETH from platform
+                    </div>
+                    <div style={styles.walletInputRow}>
+                      <input
+                        type="number"
+                        min="0.01"
+                        step="0.1"
+                        value={withdrawAmount}
+                        onChange={e => setWithdrawAmount(e.target.value)}
+                        style={styles.walletInput}
+                        placeholder="Amount"
+                      />
+                      <button
+                        style={{ ...styles.walletActionBtn, background: "rgba(240,149,149,0.15)", color: "#f09595", border: "1px solid rgba(240,149,149,0.3)" }}
+                        onClick={WithdrawDeposit}
+                      >
+                        Withdraw
+                      </button>
+                    </div>
+
+                    <p style={styles.walletNote}>
+                      Minimum 1 ETH deposit is required to use the platform.
+                      Withdrawal blocked while you have an active dispute.
+                    </p>
+
+                    {walletTxStatus && (
+                      <div style={styles.walletTxStatus}>{walletTxStatus}</div>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Quit / disconnect */}
@@ -225,8 +361,8 @@ function App() {
           <span>
             Mandatory deposit below 1 ETH. Platform functions are restricted.
           </span>
-          <button style={styles.stakeBtn} onClick={stakeDeposit}>
-            Stake 1 ETH →
+          <button style={styles.stakeBtn} onClick={() => { setShowWalletPanel(true); fetchWalletInfo() }}>
+            Open Wallet →
           </button>
         </div>
       )}
@@ -241,7 +377,7 @@ function App() {
               You've been randomly selected to review{" "}
               <strong>{pendingJurorCount} dispute{pendingJurorCount > 1 ? "s" : ""}</strong>
               <br /><br />
-              Each vote requires a <strong>0.1 ETH</strong> participation stake.
+              Each vote requires a certain amount of ETH participation stake.
               Majority voters earn a share of the penalty pool.
             </p>
             <div style={styles.popupActions}>
@@ -442,7 +578,20 @@ const styles = {
   logo: { color: "#a8f5d4", fontSize: "20px", fontWeight: "700", letterSpacing: "0.06em" },
   headerRight: { display: "flex", alignItems: "center", gap: "10px" },
   headerInfo: { display: "flex", alignItems: "center", gap: "10px" },
-  walletTag: { padding: "6px 14px", background: "rgba(168,245,212,0.08)", border: "1px solid rgba(168,245,212,0.2)", borderRadius: "20px", fontSize: "12px", color: "#a8f5d4", fontFamily: "monospace" },
+  // Wallet
+  walletTag: { padding: "6px 14px", background: "rgba(168,245,212,0.08)", border: "1px solid rgba(168,245,212,0.2)", borderRadius: "20px", fontSize: "12px", color: "#a8f5d4", fontFamily: "monospace", cursor: "pointer" },
+  walletPanel: { position: "absolute", top: "calc(100% + 8px)", right: 0, width: "260px", background: "#181818", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "12px", padding: "16px", zIndex: 200, boxShadow: "0 8px 32px rgba(0,0,0,0.5)" },
+  walletPanelTitle: { fontSize: "11px", fontWeight: "700", letterSpacing: "0.1em", textTransform: "uppercase", color: "#555", marginBottom: "12px" },
+  walletRow: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" },
+  walletLabel: { fontSize: "11px", color: "#666", marginBottom: "4px" },
+  walletValue: { fontSize: "13px", fontWeight: "600", fontFamily: "monospace", color: "#e8e6de" },
+  walletDivider: { height: "1px", background: "rgba(255,255,255,0.06)", margin: "12px 0" },
+  walletInputRow: { display: "flex", gap: "6px", marginBottom: "4px" },
+  walletInput: { flex: 1, padding: "7px 10px", background: "rgba(0,0,0,0.3)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "6px", color: "#fff", fontSize: "12px" },
+  walletActionBtn: { padding: "7px 12px", background: "rgba(168,245,212,0.15)", border: "1px solid rgba(168,245,212,0.3)", borderRadius: "6px", color: "#a8f5d4", fontSize: "12px", fontWeight: "700", cursor: "pointer", whiteSpace: "nowrap" },
+  walletNote: { fontSize: "11px", color: "#555", lineHeight: "1.5", marginTop: "10px" },
+  walletTxStatus: { fontSize: "12px", color: "#a8f5d4", marginTop: "8px", padding: "6px 10px", background: "rgba(168,245,212,0.06)", borderRadius: "6px" },
+  
   quitBtn: { padding: "6px 14px", background: "rgba(255,80,80,0.12)", border: "1px solid rgba(255,80,80,0.35)", borderRadius: "20px", fontSize: "12px", color: "#ff6b6b", cursor: "pointer" },
   depositWarn: { fontSize: "12px", color: "#f09595", padding: "4px 10px", background: "rgba(240,149,149,0.1)", border: "1px solid rgba(240,149,149,0.2)", borderRadius: "10px" },
   connectBtn: { padding: "8px 20px", background: "#a8f5d4", color: "#0d0d0f", border: "none", borderRadius: "20px", fontSize: "13px", fontWeight: "700", cursor: "pointer" },

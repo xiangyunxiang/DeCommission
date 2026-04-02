@@ -78,6 +78,29 @@ export default function ClientPage({ signer, account }) {
     }
   }, [signer])
 
+  // ── MODULE 2: Auto-refresh order status ─────
+  // Covers all state transitions so UI auto-updates without manual refresh.
+  // Listen to backend contracts' events. Event names match.  
+  useEffect(() => {
+    if (!signer) return
+    const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
+    const refresh = () => fetchMyOrders()
+
+    contract.on("CommissionAccepted", refresh)  // 0→1: Artist accepted
+    contract.on("ProductShipped",     refresh)  // 1→2: Artist delivered
+    contract.on("ProductCompleted",   refresh)  // 2→3: Client approved
+    contract.on("ProductDisputed",    refresh)  // 2→4: Dispute raised
+    contract.on("DisputeResolved",    refresh)  // 4→5: Dispute settled
+
+    return () => {
+      contract.off("CommissionAccepted", refresh)
+      contract.off("ProductShipped",     refresh)
+      contract.off("ProductCompleted",   refresh)
+      contract.off("ProductDisputed",    refresh)
+      contract.off("DisputeResolved",    refresh)
+    }
+  }, [signer])
+
   const fetchMyOrders = async () => {
     setFetchError(null)
     setLoading(true)
@@ -142,6 +165,11 @@ export default function ClientPage({ signer, account }) {
       console.warn("fetchArtists failed:", err.message)
     }
   }
+
+  // ── IPFS download helper ──────────────────────────────────────────────────
+  // Constructs a public IPFS gateway URL from a CID.
+  // In production with Pinata: swap gateway to https://gateway.pinata.cloud/ipfs/
+  const ipfsUrl = (cid) => `https://ipfs.io/ipfs/${cid}`
 
   // ── MODULE 2: Create listing → real contract call ────────────────────────
   const createListing = async (e) => {
@@ -489,7 +517,18 @@ export default function ClientPage({ signer, account }) {
                     <p style={styles.hintText}>
                       📥 Artist submitted watermarked work. Please review and decide:
                     </p>
-                    <div style={{ display: "flex", gap: "10px" }}>
+                    {/* IPFS Download Button */}
+                    {order.deliveryCid && (
+                      <a
+                        href={ipfsUrl(order.deliveryCid)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={styles.downloadBtn}
+                      >
+                        ⬇ Preview Watermarked Work (IPFS)
+                      </a>
+                    )}
+                    <div style={{ display: "flex", gap: "10px", marginTop: "10px" }}>
                       <button style={styles.successBtn} onClick={() => confirmCompletion(order.id)} disabled={loading}>
                         {loading ? "..." : "✓ Approve & Release Funds"}
                       </button>
@@ -529,9 +568,26 @@ export default function ClientPage({ signer, account }) {
                 </div>
                 <div style={styles.orderAmount}>{order.amount} ETH</div>
                 <div style={styles.cidText}>CID: {order.cid}</div>
+
+                {/* ── IPFS Download Button ── */}
+                {order.deliveryCid && (
+                  <div style={{ marginTop: "12px", marginBottom: "8px" }}>
+                    <a
+                      href={ipfsUrl(order.deliveryCid)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ ...styles.downloadBtn, background: order.status === 3 ? "rgba(168,245,212,0.15)" : styles.downloadBtn.background }}
+                    >
+                      {order.status === 3 
+                        ? "💎 Download High-Res Original (Unwatermarked)" 
+                        : "📄 Download Delivery Record (IPFS)"}
+                    </a>
+                  </div>
+                )}
+
                 {order.status === 3 && (
                   <p style={styles.reputationNote}>
-                    🎉 Successfully completed transaction.
+                    🎉 Successfully completed transaction. Fund released to Artist.
                   </p>
                 )}
                 {order.status === 5 && (
@@ -636,5 +692,6 @@ const styles = {
   magicBtn: {},  // removed — demo-only buttons deleted
   ghostBtn: { padding: "9px 16px", background: "transparent", color: "rgba(232,230,222,0.5)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "8px", fontSize: "13px", cursor: "pointer" },
   successBtn: { flex: 1, padding: "10px", background: "#a8f5d4", border: "none", borderRadius: "6px", color: "#000", fontWeight: "700", cursor: "pointer" },
+  downloadBtn: { display: "block", width: "100%", padding: "9px", background: "rgba(168,245,212,0.07)", border: "1px solid rgba(168,245,212,0.2)", borderRadius: "8px", color: "#a8f5d4", fontSize: "12px", textAlign: "center", textDecoration: "none", marginBottom: "4px" },
   dangerBtn: { flex: 1, padding: "10px", background: "transparent", border: "1px solid rgba(255,139,139,0.4)", borderRadius: "6px", color: "#ff8b8b", cursor: "pointer" },
 }
