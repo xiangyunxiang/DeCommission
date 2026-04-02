@@ -78,6 +78,19 @@ export default function ClientPage({ signer, account }) {
     }
   }, [signer])
 
+  // ── MODULE 2: Auto-refresh order status ─────
+  useEffect(() => {
+    if (!signer) return
+    const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
+    const refresh = () => fetchMyOrders()
+    contract.on("DisputeResolved", refresh)
+    contract.on("ProductCompleted",  refresh)
+    return () => {
+      contract.off("DisputeResolved", refresh)
+      contract.off("ProductCompleted",  refresh)
+    }
+  }, [signer])
+
   const fetchMyOrders = async () => {
     setFetchError(null)
     setLoading(true)
@@ -142,6 +155,11 @@ export default function ClientPage({ signer, account }) {
       console.warn("fetchArtists failed:", err.message)
     }
   }
+
+  // ── IPFS download helper ──────────────────────────────────────────────────
+  // Constructs a public IPFS gateway URL from a CID.
+  // In production with Pinata: swap gateway to https://gateway.pinata.cloud/ipfs/
+  const ipfsUrl = (cid) => `https://ipfs.io/ipfs/${cid}`
 
   // ── MODULE 2: Create listing → real contract call ────────────────────────
   const createListing = async (e) => {
@@ -489,7 +507,18 @@ export default function ClientPage({ signer, account }) {
                     <p style={styles.hintText}>
                       📥 Artist submitted watermarked work. Please review and decide:
                     </p>
-                    <div style={{ display: "flex", gap: "10px" }}>
+                    {/* Download watermarked delivery from IPFS */}
+                    {order.deliveryCid && (
+                      <a
+                        href={ipfsUrl(order.deliveryCid)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={styles.downloadBtn}
+                      >
+                        ⬇ Preview Watermarked Work (IPFS)
+                      </a>
+                    )}
+                    <div style={{ display: "flex", gap: "10px", marginTop: "10px" }}>
                       <button style={styles.successBtn} onClick={() => confirmCompletion(order.id)} disabled={loading}>
                         {loading ? "..." : "✓ Approve & Release Funds"}
                       </button>
@@ -636,5 +665,6 @@ const styles = {
   magicBtn: {},  // removed — demo-only buttons deleted
   ghostBtn: { padding: "9px 16px", background: "transparent", color: "rgba(232,230,222,0.5)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "8px", fontSize: "13px", cursor: "pointer" },
   successBtn: { flex: 1, padding: "10px", background: "#a8f5d4", border: "none", borderRadius: "6px", color: "#000", fontWeight: "700", cursor: "pointer" },
+  downloadBtn: { display: "block", width: "100%", padding: "9px", background: "rgba(168,245,212,0.07)", border: "1px solid rgba(168,245,212,0.2)", borderRadius: "8px", color: "#a8f5d4", fontSize: "12px", textAlign: "center", textDecoration: "none", marginBottom: "4px" },
   dangerBtn: { flex: 1, padding: "10px", background: "transparent", border: "1px solid rgba(255,139,139,0.4)", borderRadius: "6px", color: "#ff8b8b", cursor: "pointer" },
 }
