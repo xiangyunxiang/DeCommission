@@ -114,6 +114,29 @@ export default function ArtistPage({ signer, account }) {
     }
   }, [signer])
 
+  // ── MODULE 2: Auto-refresh order status ─────
+  // Covers all state transitions so UI auto-updates without manual refresh.
+  // Listen to backend contracts' events. Event names match.  
+  useEffect(() => {
+    if (!signer) return
+    const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
+    const refresh = () => fetchMyOrders()
+
+    contract.on("CommissionAccepted", refresh)  // 0→1: Artist accepted
+    contract.on("ProductShipped",     refresh)  // 1→2: Artist delivered
+    contract.on("ProductCompleted",   refresh)  // 2→3: Client approved
+    contract.on("ProductDisputed",    refresh)  // 2→4: Dispute raised
+    contract.on("DisputeResolved",    refresh)  // 4→5: Dispute settled
+
+    return () => {
+      contract.off("CommissionAccepted", refresh)
+      contract.off("ProductShipped",     refresh)
+      contract.off("ProductCompleted",   refresh)
+      contract.off("ProductDisputed",    refresh)
+      contract.off("DisputeResolved",    refresh)
+    }
+  }, [signer])
+
   const fetchListings = async () => {
     try {
       const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
@@ -164,6 +187,11 @@ export default function ArtistPage({ signer, account }) {
       console.warn("fetchMyOrders: contract not ready or ABI mismatch", err.message)
     }
   }
+
+  // ── IPFS download helper ──────────────────────────────────────────────────
+  // Constructs a public IPFS gateway URL from a CID.
+  // In production with Pinata: swap gateway to https://gateway.pinata.cloud/ipfs/
+  const ipfsUrl = (cid) => `https://ipfs.io/ipfs/${cid}`
 
   // ── MODULE 2: Accept order ───────────────────────────────────────────────
   const acceptOrder = async (listing) => {
@@ -335,6 +363,11 @@ export default function ArtistPage({ signer, account }) {
             </div>
 
             <div style={styles.cidText}>Requirements CID: {order.cid}</div>
+            {order.cid && !order.cid.startsWith("QmFake") && (
+              <a href={ipfsUrl(order.cid)} target="_blank" rel="noopener noreferrer" style={styles.downloadBtn}>
+                ⬇ Download Requirements (IPFS)
+              </a>
+            )}
 
             {/* Status 1: In Progress (Submit watermarked delivery) */}
             {order.status === 1 && (
@@ -489,12 +522,13 @@ const styles = {
   expandNote: { fontSize: "12px", color: "#666", marginTop: "6px", lineHeight: "1.5" },
   reputationNote: { fontSize: "12px", color: "#a8f5d4", marginTop: "8px" },
   
-  // 
+  // Button
   
   primaryBtn: { padding: "10px 20px", background: "#a8f5d4", color: "#0d0d0f", border: "none", borderRadius: "8px", fontSize: "13px", fontWeight: "700", cursor: "pointer", whiteSpace: "nowrap" },
   ownOrderBadge: { padding: "10px 16px", background: "rgba(255,255,255,0.04)", color: "rgba(232,230,222,0.35)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "8px", fontSize: "12px", fontStyle: "italic", whiteSpace: "nowrap" },
   ghostBtn: { padding: "10px 16px", background: "transparent", color: "rgba(232,230,222,0.5)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "8px", fontSize: "13px", cursor: "pointer" },
   deliverBtn: { width: "100%", padding: "12px", background: "rgba(168,245,212,0.1)", border: "1px solid rgba(168,245,212,0.3)", borderRadius: "8px", color: "#a8f5d4", fontSize: "13px", fontWeight: "700", cursor: "pointer" },
+  downloadBtn: { display: "block", width: "100%", padding: "9px", background: "rgba(168,245,212,0.07)", border: "1px solid rgba(168,245,212,0.2)", borderRadius: "8px", color: "#a8f5d4", fontSize: "12px", textAlign: "center", textDecoration: "none", margin: "6px 0" },
   dangerBtn: { width: "100%", padding: "10px", background: "transparent", border: "1px solid rgba(255,139,139,0.35)", borderRadius: "8px", color: "#ff8b8b", fontSize: "13px", cursor: "pointer" },
   magicBtn: { width: "100%", padding: "9px", background: "rgba(255,255,255,0.03)", border: "1px dashed rgba(255,255,255,0.12)", borderRadius: "8px", color: "#666", cursor: "pointer", fontSize: "12px", marginTop: "8px" },
   
