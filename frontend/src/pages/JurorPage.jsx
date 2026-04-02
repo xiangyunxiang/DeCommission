@@ -16,7 +16,7 @@
  * REAL CONTRACT CALLS
  * ─────────────────────────────────────────────────────────────
  *   - fetchDisputes()                     loads assigned disputes from DisputeManager
- *   - payStake(disputeId)                 payable 0.1 ETH — unlocks evidence access
+ *   - payStake(disputeId)                 payable ETH stake — unlocks evidence access
  *   - castVote(disputeId, supportClient)  no extra ETH (already staked)
  *   - abstain(disputeId)                  triggers stake refund via withdrawStake
  *
@@ -26,7 +26,7 @@
  *
  * ─── VOTING STATE MACHINE (per dispute card) ─────────────────
  *   "invited"   Initial state. Juror sees case info but evidence
- *               is locked. Must pay 0.1 ETH stake to proceed.
+ *               is locked. Must pay ETH stake to proceed.
  *               If deadline passes before staking → card disappears.
  *
  *   "staked"    Stake paid. Evidence CIDs are now unlocked.
@@ -173,6 +173,9 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
             requirementsCid: product?.ipfsHash         || null,
             watermarkedWork:  product?.deliveryIpfsHash || null,
           },
+          reviewerStakeRaw: d.reviewerStake, // 保留 BigInt 类型用于合约调用
+          reviewerStakeEth: ethers.formatEther(d.reviewerStake), // 用于前端展示
+          reviewerCount: Number(d.reviewerCount), // 本次纠纷需要的总人数
         }
       }))
 
@@ -201,6 +204,28 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
     }
   }
 
+  // ── MODULE: Auto-refresh Dispute State ─────
+  useEffect(() => {
+    if (!signer || !account) return;
+    const dm = new ethers.Contract(DISPUTE_MANAGER_ADDRESS, DISPUTE_MANAGER_ABI, signer);
+    
+    const refresh = () => fetchDisputes(); 
+
+    dm.on("ReviewerStaked",  refresh)
+    dm.on("ReviewerWithdrew", refresh)   // abstain event
+    dm.on("VoteCast",         refresh)
+    dm.on("DisputeResolved",  refresh)
+    dm.on("TieDetected",      refresh)   // new round triggered → reload invitations
+
+    return () => {
+      dm.off("ReviewerStaked",  refresh)
+      dm.off("ReviewerWithdrew", refresh)
+      dm.off("VoteCast",         refresh)
+      dm.off("DisputeResolved",  refresh)
+      dm.off("TieDetected",      refresh)
+    };
+  }, [signer, account]);
+
 
   // ── Helpers ───────────────────────────────────────────────────────────────
   const formatCountdown = (deadlineTs) => {
@@ -222,11 +247,13 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
   const payStake = async (disputeId) => {
     if (!signer) { alert("Please connect your wallet."); return }
     setLoading(true)
-    setTxStatus("⏳ Paying 0.1 ETH participation stake to unlock evidence...")
+    const dispute = disputes.find(d => d.id === disputeId); // 找到当前纠纷
+    const amountRaw = dispute.reviewerStakeRaw; // 使用从合约拿到的原始 BigInt
+    setTxStatus(`⏳ Paying ${dispute.reviewerStakeEth} ETH participation stake to unlock evidence...`)
     try {
       const dm = new ethers.Contract(DISPUTE_MANAGER_ADDRESS, DISPUTE_MANAGER_ABI, signer)
-      // stakeToEnter(uint256 productId) payable — locks 0.1 ETH, unlocks evidence access
-      const tx = await dm.stakeToEnter(disputeId, { value: ethers.parseEther("0.1") })
+      // 动态押金
+      const tx = await dm.stakeToEnter(disputeId, { value: amountRaw })
       await tx.wait()
       setPhase(disputeId, "staked")
       setTxStatus("✅ Stake paid. Evidence files are now accessible.")
@@ -267,11 +294,11 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
     setTxStatus("⏳ Choosing abstention, stake will be refunded...")
     try {
       const dm = new ethers.Contract(DISPUTE_MANAGER_ADDRESS, DISPUTE_MANAGER_ABI, signer)
-      // withdrawStake(uint256 productId) — exits round, triggers 0.1 ETH refund
+      // withdrawStake(uint256 productId) — exits round, triggers ETH stake refund
       const tx = await dm.withdrawStake(disputeId)
       await tx.wait()
       setPhase(disputeId, "abstained")
-      setTxStatus("✅ Abstained. Your 0.1 ETH stake has been refunded.")
+      setTxStatus("✅ Abstained. Your ETH stake has been refunded.")
     } catch (err) {
       setTxStatus(err.code === 4001 ? "Cancelled." : `❌ ${err.message}`)
     } finally {
@@ -288,7 +315,7 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
           <div style={styles.poolPanelSub}>
             {poolSize === null
               ? "Loading pool info..."
-              : `${poolSize} registered — ${poolSize >= 5 ? "✅ enough for disputes" : `⚠️ need ${5 - poolSize} more minimum (5 needed, excluding buyer & seller per dispute)`}`
+              : `${poolSize} registered — ${poolSize >= 7 ? "✅ enough for all tiers" : `⚠️ need ${7 - poolSize} more for Tier 3 (up to 7 needed)`}`
             }
           </div>
         </div>
@@ -322,9 +349,10 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
       )}
 
       <p style={styles.poolPanelNote}>
-        Disputes require 5 randomly selected jurors, excluding the buyer and seller.
+        Jurors are randomly selected for dispute, excluding the buyer and seller.
+        Different order values require different numbers of jurors (3, 5, or 7 in demo).
         Switch MetaMask accounts and click “Participate as Juror” for each one to fill the pool.
-        Once assigned to a dispute, a 0.1 ETH stake is required to unlock evidence and vote.
+        Once assigned to a dispute, an certain amount of ETH stake is required to unlock evidence and vote.
       </p>
     </div>
   )
@@ -405,7 +433,7 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
             Voting progress is blind. You cannot see other Jurors' choices or the current tally.
           </div>
         </div>
-        <div style={styles.stakeBadge}>Participation stake: 0.1 ETH</div>
+        <div style={styles.stakeBadge}>Participation Stake varies as order value</div>
       </div>
 
       {txStatus && <div style={styles.statusBar}>{txStatus}</div>}
@@ -451,12 +479,12 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
               <div style={styles.stepBox}>
                 <div style={styles.stepLabel}>Phase 1: Pay participation stake to unlock evidence</div>
                 <p style={styles.stepHint}>
-                  A 0.1 ETH stake is required to access the evidence files and cast your vote.
+                  ETH stake (varying as order value) is required to access the evidence files and cast your vote.
                   If you abstain after staking, your stake will be refunded in full.
                   If you do not stake before the deadline, this invitation will expire.
                 </p>
                 <button style={styles.stakeBtn} onClick={() => payStake(dispute.id)} disabled={loading}>
-                  {loading ? "Processing..." : "Pay 0.1 ETH to Unlock Evidence →"}
+                  {loading ? "Processing..." : `Pay ${dispute.reviewerStakeEth} ETH to Unlock Evidence →`}
                 </button>
               </div>
             )}
@@ -509,7 +537,7 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
                       </button>
                     </div>
                     <p style={styles.stakeReminder}>
-                      Voting requires a 0.1 ETH participation stake.
+                      Voting requires ETH participation stake, whose amount varies as order value.
                       Majority voters receive their stake back plus a share of the penalty pool.
                       Minority voters forfeit their stake.
                     </p>
