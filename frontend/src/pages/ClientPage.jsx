@@ -517,7 +517,7 @@ export default function ClientPage({ signer, account }) {
                     <p style={styles.hintText}>
                       📥 Artist submitted watermarked work. Please review and decide:
                     </p>
-                    {/* Download watermarked delivery from IPFS */}
+                    {/* IPFS Download Button */}
                     {order.deliveryCid && (
                       <a
                         href={ipfsUrl(order.deliveryCid)}
@@ -568,9 +568,26 @@ export default function ClientPage({ signer, account }) {
                 </div>
                 <div style={styles.orderAmount}>{order.amount} ETH</div>
                 <div style={styles.cidText}>CID: {order.cid}</div>
+
+                // IPFS Download Button
+                {order.deliveryCid && (
+                  <div style={{ marginTop: "12px", marginBottom: "8px" }}>
+                    <a
+                      href={ipfsUrl(order.deliveryCid)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ ...styles.downloadBtn, background: order.status === 3 ? "rgba(168,245,212,0.15)" : styles.downloadBtn.background }}
+                    >
+                      {order.status === 3 
+                        ? "💎 Download High-Res Original (Unwatermarked)" 
+                        : "📄 Preview Watermarked Work (IPFS)"}
+                    </a>
+                  </div>
+                )}
+
                 {order.status === 3 && (
                   <p style={styles.reputationNote}>
-                    🎉 Successfully completed transaction.
+                    🎉 Successfully completed transaction. Fund released to Artist.
                   </p>
                 )}
                 {order.status === 5 && (
@@ -659,6 +676,8 @@ const styles = {
   hintText: { fontSize: "13px", color: "#888", marginBottom: "10px", lineHeight: "1.6" },
   actionBox: { marginTop: "12px", padding: "14px", background: "rgba(255,255,255,0.03)", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.06)" },
   reputationNote: { fontSize: "12px", color: "#a8f5d4", marginTop: "8px" },
+
+  
 
   // Tags
   waitingTag:   { fontSize: "12px", color: "#888",    background: "rgba(255,255,255,0.08)", padding: "3px 8px", borderRadius: "6px" },
