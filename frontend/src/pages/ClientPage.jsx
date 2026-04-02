@@ -569,7 +569,7 @@ export default function ClientPage({ signer, account }) {
                 <div style={styles.orderAmount}>{order.amount} ETH</div>
                 <div style={styles.cidText}>CID: {order.cid}</div>
 
-                // IPFS Download Button
+                {/* ── IPFS Download Button ── */}
                 {order.deliveryCid && (
                   <div style={{ marginTop: "12px", marginBottom: "8px" }}>
                     <a
@@ -580,7 +580,7 @@ export default function ClientPage({ signer, account }) {
                     >
                       {order.status === 3 
                         ? "💎 Download High-Res Original (Unwatermarked)" 
-                        : "📄 Preview Watermarked Work (IPFS)"}
+                        : "📄 Download Delivery Record (IPFS)"}
                     </a>
                   </div>
                 )}
