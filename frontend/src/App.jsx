@@ -72,6 +72,9 @@ function App() {
   // Juror
   const [showJurorPopup, setShowJurorPopup]   = useState(false)
   const [pendingJurorCount, setPendingJurorCount] = useState(MOCK_JUROR_INVITATIONS)
+  const [walletBalance, setWalletBalance]         = useState(null)  // ETH in MetaMask
+  const [contractDeposit, setContractDeposit]     = useState(null)  // ETH in contract
+  const [showWalletPanel, setShowWalletPanel]     = useState(false) // wallet dropdown
 
   // ── Juror eligibility count ─────────────────────────────────────────────
   // Combines completed orders from BOTH roles for this wallet address.
@@ -79,7 +82,7 @@ function App() {
   // Status 5 (dispute-closed) does NOT count.
   //
   // MVP: uses MOCK_COMPLETED_COUNT so the demo works without a deployed contract.
-  // Production: replace with fetchCompletedCount(signer) below.
+  
   const [completedCount, setCompletedCount] = useState(MOCK_COMPLETED_COUNT)
   const isJurorEligible = completedCount >= 10
 
@@ -172,6 +175,22 @@ function App() {
     } catch (err) { console.error("Deposit failed", err) }
   }
 
+// ── Fetch wallet balance + contract deposit for the wallet panel ────────
+  const fetchWalletInfo = async (signerObj, address) => {
+    try {
+      const provider = new ethers.BrowserProvider(window.ethereum)
+      // Raw ETH balance in MetaMask wallet
+      const rawBal = await provider.getBalance(address)
+      setWalletBalance(parseFloat(ethers.formatEther(rawBal)).toFixed(4))
+      // ETH deposited into the contract (mandatory deposit)
+      const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signerObj)
+      const dep = await contract.depositBalance(address)
+      setContractDeposit(parseFloat(ethers.formatEther(dep)).toFixed(4))
+    } catch (err) {
+      console.warn("fetchWalletInfo failed", err.message)
+    }
+  }
+  
   // ─── RENDER ────────────────────────────────────────────────────────────────
   return (
     <div style={styles.app}>
@@ -201,9 +220,58 @@ function App() {
                 </button>
               )}
 
-              {/* Wallet address */}
-              <div style={styles.walletTag}>
-                {account.slice(0, 6)}...{account.slice(-4)}
+              {/* Wallet button: click to open balance panel */}
+              <div style={{ position: "relative" }}>
+                <button
+                  style={styles.walletTag}
+                  onClick={() => {
+                    setShowWalletPanel(p => !p)
+                    if (signer && account) fetchWalletInfo(signer, account)
+                  }}
+                >
+                  {account.slice(0, 6)}...{account.slice(-4)} ▾
+                </button>
+
+                {/* Wallet balance dropdown panel */}
+                {showWalletPanel && (
+                  <div style={styles.walletPanel}>
+                    <div style={styles.walletPanelTitle}>Wallet</div>
+
+                    <div style={styles.walletRow}>
+                      <span style={styles.walletLabel}>MetaMask balance</span>
+                      <span style={styles.walletValue}>
+                        {walletBalance !== null ? `${walletBalance} ETH` : "Loading..."}
+                      </span>
+                    </div>
+
+                    <div style={styles.walletRow}>
+                      <span style={styles.walletLabel}>Decommission deposit</span>
+                      <span style={{
+                        ...styles.walletValue,
+                        color: contractDeposit !== null && parseFloat(contractDeposit) >= 1
+                          ? "#a8f5d4" : "#f09595"
+                      }}>
+                        {contractDeposit !== null ? `${contractDeposit} ETH` : "Loading..."}
+                      </span>
+                    </div>
+
+                    <div style={styles.walletNote}>
+                      ≥ 1 ETH deposit required to use the platform.
+                      {contractDeposit !== null && parseFloat(contractDeposit) < 1 && (
+                        <span style={{ color: "#f09595" }}> Gentle reminder: Your deposit is insufficient.</span>
+                      )}
+                    </div>
+
+                    {depositStatus === "insufficient" && (
+                      <button style={styles.walletStakeBtn} onClick={() => {
+                        stakeDeposit()
+                        setShowWalletPanel(false)
+                      }}>
+                        Stake 1 ETH →
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Quit / disconnect */}
@@ -304,7 +372,7 @@ function App() {
             </button>
           </div>
 
-          {/* Dashboard content — all three pages stay mounted; CSS hides inactive ones */}
+          {/* Dashboard content： all three pages stay mounted; CSS hides inactive ones */}
           <div style={styles.dashboardContent}>
             <div style={{display: activeTab === "commission" ? "block" : "none"}}>
               <ClientPage signer={signer} account={account} />
@@ -442,7 +510,16 @@ const styles = {
   logo: { color: "#a8f5d4", fontSize: "20px", fontWeight: "700", letterSpacing: "0.06em" },
   headerRight: { display: "flex", alignItems: "center", gap: "10px" },
   headerInfo: { display: "flex", alignItems: "center", gap: "10px" },
-  walletTag: { padding: "6px 14px", background: "rgba(168,245,212,0.08)", border: "1px solid rgba(168,245,212,0.2)", borderRadius: "20px", fontSize: "12px", color: "#a8f5d4", fontFamily: "monospace" },
+  // Wallet
+  walletTag: { padding: "6px 14px", background: "rgba(168,245,212,0.08)", border: "1px solid rgba(168,245,212,0.2)", borderRadius: "20px", fontSize: "12px", color: "#a8f5d4", fontFamily: "monospace", cursor: "pointer" },
+  walletPanel: { position: "absolute", top: "calc(100% + 8px)", right: 0, width: "240px", background: "#181818", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "12px", padding: "16px", zIndex: 200, boxShadow: "0 8px 32px rgba(0,0,0,0.4)" },
+  walletPanelTitle: { fontSize: "11px", fontWeight: "700", letterSpacing: "0.1em", textTransform: "uppercase", color: "#555", marginBottom: "12px" },
+  walletRow: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" },
+  walletLabel: { fontSize: "12px", color: "#666" },
+  walletValue: { fontSize: "13px", fontWeight: "600", color: "#e8e6de", fontFamily: "monospace" },
+  walletNote: { fontSize: "11px", color: "#555", lineHeight: "1.5", marginTop: "10px", paddingTop: "10px", borderTop: "1px solid rgba(255,255,255,0.06)" },
+  walletStakeBtn: { width: "100%", marginTop: "10px", padding: "9px", background: "#a8f5d4", color: "#0d0d0f", border: "none", borderRadius: "8px", fontSize: "12px", fontWeight: "700", cursor: "pointer" },
+  
   quitBtn: { padding: "6px 14px", background: "rgba(255,80,80,0.12)", border: "1px solid rgba(255,80,80,0.35)", borderRadius: "20px", fontSize: "12px", color: "#ff6b6b", cursor: "pointer" },
   depositWarn: { fontSize: "12px", color: "#f09595", padding: "4px 10px", background: "rgba(240,149,149,0.1)", border: "1px solid rgba(240,149,149,0.2)", borderRadius: "10px" },
   connectBtn: { padding: "8px 20px", background: "#a8f5d4", color: "#0d0d0f", border: "none", borderRadius: "20px", fontSize: "13px", fontWeight: "700", cursor: "pointer" },
