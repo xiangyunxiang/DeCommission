@@ -51,7 +51,7 @@ import { CONTRACT_ADDRESS, CONTRACT_ABI, DISPUTE_MANAGER_ADDRESS, DISPUTE_MANAGE
 
 
 // ─────────────────────────────────────────────────────────────────────────────
-export default function JurorPage({ signer, account, completedCount, onPendingCountChange }) {
+export default function JurorPage({ signer, account, completedCount, onPendingCountChange, onTxComplete }) {
 
   const REQUIRED = 10
   const isEligible = completedCount >= REQUIRED
@@ -256,6 +256,7 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
       const tx = await dm.stakeToEnter(disputeId, { value: amountRaw })
       await tx.wait()
       setPhase(disputeId, "staked")
+      onTxComplete?.()
       setTxStatus("✅ Stake paid. Evidence files are now accessible.")
     } catch (err) {
       setTxStatus(err.code === 4001 ? "Cancelled." : `❌ ${err.message}`)
@@ -279,6 +280,7 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
       await tx.wait()
       setVoteChoice(prev => ({ ...prev, [disputeId]: label }))
       setPhase(disputeId, "voted")
+      onTxComplete?.()
       setTxStatus(`✅ Vote locked in. Support ${label}. Awaiting verdict.`)
     } catch (err) {
       setTxStatus(err.code === 4001 ? "Cancelled." : `❌ ${err.message}`)
@@ -298,6 +300,7 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
       const tx = await dm.withdrawStake(disputeId)
       await tx.wait()
       setPhase(disputeId, "abstained")
+      onTxComplete?.()
       setTxStatus("✅ Abstained. Your ETH stake has been refunded.")
     } catch (err) {
       setTxStatus(err.code === 4001 ? "Cancelled." : `❌ ${err.message}`)
