@@ -190,17 +190,19 @@ function App() {
   // Minimum to use the platform: 1 ETH (enforced on-chain by MIN_DEPOSIT)
   const DepositToContract = async () => {
     if (!depositAmount || parseFloat(depositAmount) <= 0) return
-    setWalletTxStatus("⏳ Depositing...")
+    setWalletTxStatus("⏳ Waiting for MetaMask confirmation...")
     try {
       const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
       const tx = await contract.deposit({ value: ethers.parseEther(depositAmount) })
+      setWalletTxStatus("⏳ Transaction submitted. Waiting for confirmation...")
       await tx.wait()
       await checkMandatoryDeposit(signer)  // re-check threshold
       await fetchWalletInfo()              // refresh panel numbers
       setWalletTxStatus(`✅ ${depositAmount} ETH deposited.`)
       setDepositAmount("1.0")
     } catch (err) {
-      console.warn("fetchWalletInfo failed", err.message)
+      const msg = err.reason || err.shortMessage || err.message
+      setWalletTxStatus(err.code === 4001 ? "Cancelled." : `❌ ${msg}`)
     }
   }
 
@@ -443,10 +445,10 @@ function App() {
           {/* Dashboard content — all three pages stay mounted; CSS hides inactive ones */}
           <div style={styles.dashboardContent}>
             <div style={{display: activeTab === "commission" ? "block" : "none"}}>
-              <ClientPage signer={signer} account={account} />
+              <ClientPage signer={signer} account={account} onTxComplete={fetchWalletInfo} />
             </div>
             <div style={{display: activeTab === "creation" ? "block" : "none"}}>
-              <ArtistPage signer={signer} account={account} />
+              <ArtistPage signer={signer} account={account} onTxComplete={fetchWalletInfo} />
             </div>
             <div style={{display: activeTab === "juror" ? "block" : "none"}}>
               <JurorPage
@@ -454,6 +456,7 @@ function App() {
                 account={account}
                 completedCount={completedCount}
                 onPendingCountChange={setPendingJurorCount}
+                onTxComplete={fetchWalletInfo}
               />
             </div>
           </div>

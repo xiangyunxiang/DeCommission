@@ -27,6 +27,7 @@
 import { useState, useEffect } from "react"
 import { ethers } from "ethers"
 import { CONTRACT_ADDRESS, CONTRACT_ABI } from "../contract/config.js"
+import { uploadDelivery, ipfsGatewayUrl } from "../utils/pinata.js"
 
 // ─── MODULE 1: Mock open listings ─────────────────────────────────────────────
 // Hardcoded. Browser tab is filled with orders to present a mature platform.
@@ -93,15 +94,18 @@ const ARTIST_STATUS = {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-export default function ArtistPage({ signer, account }) {
+export default function ArtistPage({ signer, account, onTxComplete }) {
 
   const [activeTab, setActiveTab] = useState("browse")  // browse | ongoing | history
   const [loading, setLoading]     = useState(false)
   const [txStatus, setTxStatus]   = useState("")
   const [expandedId, setExpandedId] = useState(null)
 
-  const [listings, setListings]   = useState([])   // open listings on the platform
-  const [myOrders, setMyOrders]   = useState([])   // Artist's own active orders
+  const [listings, setListings]     = useState([])   // open listings on the platform
+  const [myOrders, setMyOrders]     = useState([])   // Artist's own active orders
+  const [deliveryFiles, setDeliveryFiles] = useState({})  // orderId -> File for IPFS upload
+  // cid -> fetched requirements object | "loading" | "error"
+  const [requirementsMeta, setRequirementsMeta] = useState({})
 
   // ── MODULE 2: Load on mount ──────────────────────────────────────────────
   useEffect(() => {
@@ -188,10 +192,6 @@ export default function ArtistPage({ signer, account }) {
     }
   }
 
-  // ── IPFS download helper ──────────────────────────────────────────────────
-  // Constructs a public IPFS gateway URL from a CID.
-  // In production with Pinata: swap gateway to https://gateway.pinata.cloud/ipfs/
-  const ipfsUrl = (cid) => `https://ipfs.io/ipfs/${cid}`
 
   // ── MODULE 2: Accept order ───────────────────────────────────────────────
   const acceptOrder = async (listing) => {
@@ -227,24 +227,37 @@ export default function ArtistPage({ signer, account }) {
 
   // ── MODULE 2: Submit delivery ────────────────────────────────────────────
   const deliverOrder = async (orderId) => {
+    const file = deliveryFiles[orderId]
+    if (!file) {
+      setTxStatus("❌ Please select a file to upload first.")
+      return
+    }
     setLoading(true)
 
-    // MODULE 1: Simulate IPFS upload
-    setTxStatus("⏳ Uploading watermarked work to IPFS (simulated)...")
-    await new Promise(r => setTimeout(r, 1500))
-    const fakeCID = "QmDeliver" + Math.random().toString(36).substring(2, 8).toUpperCase()
+    // Step 1: Upload to Pinata / IPFS
+    setTxStatus("⏳ Applying watermark and uploading both versions to IPFS...")
+    let cid
+    try {
+      cid = await uploadDelivery(file)
+    } catch (err) {
+      setTxStatus(`❌ IPFS upload failed: ${err.message}`)
+      setLoading(false)
+      return
+    }
 
-    // MODULE 2: Real contract call
+    // Step 2: Submit CID on-chain
     setTxStatus("⏳ Submitting delivery CID on-chain...")
     try {
       const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
       // confirmShipment(uint256 productId, string deliveryIpfsHash)
-      const tx = await contract.confirmShipment(orderId, fakeCID)
+      const tx = await contract.confirmShipment(orderId, cid)
       await tx.wait()
       setMyOrders(prev =>
-        prev.map(o => o.id === orderId ? { ...o, status: 2, deliveryCid: fakeCID } : o)
+        prev.map(o => o.id === orderId ? { ...o, status: 2, deliveryCid: cid } : o)
       )
-      setTxStatus(`✅ Successful Delivery! CID: ${fakeCID}`)
+      setDeliveryFiles(prev => { const next = { ...prev }; delete next[orderId]; return next })
+      onTxComplete?.()
+      setTxStatus(`✅ Delivered! IPFS CID: ${cid}`)
     } catch (err) {
       setTxStatus(err.code === 4001 ? "Cancelled." : `❌ ${err.message}`)
     } finally {
@@ -262,6 +275,7 @@ export default function ArtistPage({ signer, account }) {
       const tx = await contract.raiseDispute(orderId)
       await tx.wait()
       setMyOrders(prev => prev.map(o => o.id === orderId ? { ...o, status: 4 } : o))
+      onTxComplete?.()
       setTxStatus("⚠️ Dispute raised. Funds frozen. Waiting for Juror votes...")
     } catch (err) {
       setTxStatus(err.code === 4001 ? "Cancelled." : `❌ ${err.message}`)
@@ -277,6 +291,19 @@ export default function ArtistPage({ signer, account }) {
   // ─────────────────────────────────────────────────────────────────────────
   // RENDER FUNCTIONS
   // ─────────────────────────────────────────────────────────────────────────
+
+  const fetchRequirementsMeta = async (cid) => {
+    if (!cid || requirementsMeta[cid]) return
+    setRequirementsMeta(prev => ({ ...prev, [cid]: "loading" }))
+    try {
+      const res = await fetch(ipfsGatewayUrl(cid))
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      setRequirementsMeta(prev => ({ ...prev, [cid]: data }))
+    } catch {
+      setRequirementsMeta(prev => ({ ...prev, [cid]: "error" }))
+    }
+  }
 
   const renderBrowse = () => (
     <div>
@@ -309,7 +336,11 @@ export default function ArtistPage({ signer, account }) {
             <div style={styles.actionRow}>
               <button
                 style={styles.ghostBtn}
-                onClick={() => setExpandedId(expandedId === listing.id ? null : listing.id)}
+                onClick={() => {
+                  const next = expandedId === listing.id ? null : listing.id
+                  setExpandedId(next)
+                  if (next !== null) fetchRequirementsMeta(listing.cid)
+                }}
               >
                 {expandedId === listing.id ? "Collapse ↑" : "View Details ↓"}
               </button>
@@ -330,11 +361,33 @@ export default function ArtistPage({ signer, account }) {
 
             {expandedId === listing.id && (
               <div style={styles.expandBox}>
-                <div style={styles.cidText}>📦 Requirements CID: {listing.cid}</div>
-                <p style={styles.expandNote}>
-                  In production, this CID resolves to the full JSON requirements
-                  (description, references, canvas specs etc.) stored on IPFS.
-                </p>
+                {(() => {
+                  const meta = requirementsMeta[listing.cid]
+                  if (!listing.cid) return <p style={styles.expandNote}>No requirements CID attached.</p>
+                  if (!meta || meta === "loading") return <p style={styles.expandNote}>⏳ Loading requirements from IPFS...</p>
+                  if (meta === "error") return (
+                    <>
+                      <div style={styles.cidText}>📦 CID: {listing.cid}</div>
+                      <p style={styles.expandNote}>⚠️ Could not fetch requirements. <a href={ipfsGatewayUrl(listing.cid)} target="_blank" rel="noopener noreferrer">Open directly ↗</a></p>
+                    </>
+                  )
+                  return (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                      {meta.description   && <div style={styles.reqRow}><span style={styles.reqLabel}>📝 Description</span><span>{meta.description}</span></div>}
+                      {meta.style         && <div style={styles.reqRow}><span style={styles.reqLabel}>🎨 Style</span><span>{meta.style}</span></div>}
+                      {meta.colorPalette  && <div style={styles.reqRow}><span style={styles.reqLabel}>🎨 Colors</span><span>{meta.colorPalette}</span></div>}
+                      {meta.canvasSize    && <div style={styles.reqRow}><span style={styles.reqLabel}>📐 Canvas</span><span>{meta.canvasSize}</span></div>}
+                      {meta.deadline      && <div style={styles.reqRow}><span style={styles.reqLabel}>📅 Deadline</span><span>{meta.deadline}</span></div>}
+                      {meta.aiTolerance   && <div style={styles.reqRow}><span style={styles.reqLabel}>🤖 AI Policy</span><span>{meta.aiTolerance}</span></div>}
+                      {meta.revisions     && <div style={styles.reqRow}><span style={styles.reqLabel}>✏️ Revisions</span><span>{meta.revisions}</span></div>}
+                      <div style={{ marginTop: "6px" }}>
+                        <a href={ipfsGatewayUrl(listing.cid)} target="_blank" rel="noopener noreferrer" style={{ fontSize: "11px", color: "#8b5cf6" }}>
+                          📦 View raw JSON on IPFS ↗
+                        </a>
+                      </div>
+                    </div>
+                  )
+                })()}
               </div>
             )}
           </div>
@@ -364,7 +417,7 @@ export default function ArtistPage({ signer, account }) {
 
             <div style={styles.cidText}>Requirements CID: {order.cid}</div>
             {order.cid && !order.cid.startsWith("QmFake") && (
-              <a href={ipfsUrl(order.cid)} target="_blank" rel="noopener noreferrer" style={styles.downloadBtn}>
+              <a href={ipfsGatewayUrl(order.cid)} target="_blank" rel="noopener noreferrer" style={styles.downloadBtn}>
                 ⬇ Download Requirements (IPFS)
               </a>
             )}
@@ -373,12 +426,32 @@ export default function ArtistPage({ signer, account }) {
             {order.status === 1 && (
               <div style={styles.actionBox}>
                 <p style={styles.hintText}>
-                  Ready to deliver? Upload your watermarked work! the CID needs to be submitted on-chain.
+                  Ready to deliver? Select your watermarked work image and upload it to IPFS.
                 </p>
+                <label style={styles.fileLabel}>
+                  <span style={styles.fileBtn}>🖼 Choose Image</span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    style={{ display: "none" }}
+                    onChange={e => {
+                      const f = e.target.files[0]
+                      if (f) setDeliveryFiles(prev => ({ ...prev, [order.id]: f }))
+                    }}
+                  />
+                </label>
+                {deliveryFiles[order.id] && (
+                  <div style={styles.fileName}>📎 {deliveryFiles[order.id].name}</div>
+                )}
                 <button
-                  style={styles.deliverBtn}
+                  style={{
+                    ...styles.deliverBtn,
+                    opacity: deliveryFiles[order.id] ? 1 : 0.45,
+                    cursor: deliveryFiles[order.id] ? "pointer" : "not-allowed",
+                    marginTop: "10px",
+                  }}
                   onClick={() => deliverOrder(order.id)}
-                  disabled={loading}
+                  disabled={loading || !deliveryFiles[order.id]}
                 >
                   {loading ? "Uploading..." : "📤 Submit Delivery (Upload to IPFS)"}
                 </button>
@@ -520,6 +593,8 @@ const styles = {
   hintText: { fontSize: "13px", color: "#888", marginBottom: "10px", lineHeight: "1.6" },
   expandBox: { marginTop: "12px", padding: "12px", background: "rgba(168,245,212,0.04)", borderRadius: "8px", border: "1px solid rgba(168,245,212,0.1)" },
   expandNote: { fontSize: "12px", color: "#666", marginTop: "6px", lineHeight: "1.5" },
+  reqRow:   { display: "flex", gap: "10px", fontSize: "13px", lineHeight: "1.5" },
+  reqLabel: { minWidth: "110px", color: "#8b8b8b", flexShrink: 0 },
   reputationNote: { fontSize: "12px", color: "#a8f5d4", marginTop: "8px" },
   
   // Button
@@ -531,6 +606,9 @@ const styles = {
   downloadBtn: { display: "block", width: "100%", padding: "9px", background: "rgba(168,245,212,0.07)", border: "1px solid rgba(168,245,212,0.2)", borderRadius: "8px", color: "#a8f5d4", fontSize: "12px", textAlign: "center", textDecoration: "none", margin: "6px 0" },
   dangerBtn: { width: "100%", padding: "10px", background: "transparent", border: "1px solid rgba(255,139,139,0.35)", borderRadius: "8px", color: "#ff8b8b", fontSize: "13px", cursor: "pointer" },
   magicBtn: { width: "100%", padding: "9px", background: "rgba(255,255,255,0.03)", border: "1px dashed rgba(255,255,255,0.12)", borderRadius: "8px", color: "#666", cursor: "pointer", fontSize: "12px", marginTop: "8px" },
+  fileLabel: { display: "inline-block", cursor: "pointer", marginBottom: "8px" },
+  fileBtn: { display: "inline-block", padding: "8px 16px", background: "rgba(168,245,212,0.08)", border: "1px solid rgba(168,245,212,0.25)", borderRadius: "8px", color: "#a8f5d4", fontSize: "13px", fontWeight: "600" },
+  fileName: { fontSize: "12px", color: "rgba(232,230,222,0.55)", marginBottom: "4px", wordBreak: "break-all" },
   
   // Tags
   ongoingTag: { fontSize: "12px", color: "#a8f5d4", background: "rgba(168,245,212,0.1)", padding: "3px 8px", borderRadius: "6px" },
