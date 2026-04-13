@@ -31,6 +31,7 @@ contract DisputeManager {
     // Voting window: jurors must vote within 24 hours of dispute opening
     uint256 public constant VOTING_PERIOD = 1 days;
 
+<<<<<<< HEAD
     // ── Tier thresholds (must stay in sync with ProductMarket.sol) ─────────────
     uint256 public constant TIER1_THRESHOLD = 0.5 ether;
     uint256 public constant TIER2_THRESHOLD = 2   ether;
@@ -38,6 +39,15 @@ contract DisputeManager {
     // ── Juror counts per tier ──────────────────────────────────────────────────
     // Odd numbers ensure no ties within a single tier round (ties still possible
     // due to absent voters, so tie-breaking via re-vote is kept as a safeguard).
+=======
+    // 动态分级参数（按订单金额）
+    // Tier 1 (Small):  price < 1 ETH   → 3 jurors, 0.05 ETH 质押
+    // Tier 2 (Medium): 1 ETH <= price < 5 ETH → 5 jurors, 0.10 ETH 质押
+    // Tier 3 (Large):  price >= 5 ETH  → 7 jurors, 0.20 ETH 质押
+    uint256 public constant TIER1_THRESHOLD = 1 ether;
+    uint256 public constant TIER2_THRESHOLD = 5 ether;
+
+>>>>>>> 58ea937 (20260414)
     uint256 public constant TIER1_REVIEWER_COUNT = 3;
     uint256 public constant TIER2_REVIEWER_COUNT = 5;
     uint256 public constant TIER3_REVIEWER_COUNT = 7;
