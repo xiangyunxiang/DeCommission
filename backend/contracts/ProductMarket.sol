@@ -12,15 +12,15 @@ contract ProductMarket {
     uint256 public constant MIN_DEPOSIT = 1 ether;
 
     // 买卖方争议质押分级（与 DisputeManager tier 对应）
-    // Tier 1 (Small):  price < 1 ETH   → 双方各质押 0.10 ETH
-    // Tier 2 (Medium): 1 ETH <= price < 5 ETH → 双方各质押 0.30 ETH
-    // Tier 3 (Large):  price >= 5 ETH  → 双方各质押 0.50 ETH
-    uint256 public constant TIER1_THRESHOLD   = 1 ether;
-    uint256 public constant TIER2_THRESHOLD   = 5 ether;
+    // Tier 1 (Small):  price < 0.5 ETH  → 双方各质押 0.05 ETH
+    // Tier 2 (Medium): 0.5 ETH <= price < 2 ETH → 双方各质押 0.15 ETH
+    // Tier 3 (Large):  price >= 2 ETH   → 双方各质押 0.30 ETH
+    uint256 public constant TIER1_THRESHOLD   = 0.5 ether;
+    uint256 public constant TIER2_THRESHOLD   = 2   ether;
 
-    uint256 public constant TIER1_DISPUTE_STAKE = 0.10 ether;
-    uint256 public constant TIER2_DISPUTE_STAKE = 0.30 ether;
-    uint256 public constant TIER3_DISPUTE_STAKE = 0.50 ether;
+    uint256 public constant TIER1_DISPUTE_STAKE = 0.05 ether;
+    uint256 public constant TIER2_DISPUTE_STAKE = 0.15 ether;
+    uint256 public constant TIER3_DISPUTE_STAKE = 0.30 ether;
 
     uint256 private productCounter;
 
@@ -154,7 +154,7 @@ contract ProductMarket {
         emit ProductShipped(productId, deliveryIpfsHash);
     }
 
-    // 买家确认收货，托管资金释放给画师
+    // 买家确认收货，托管资金释放给画师（转入画师 deposit）
     function confirmReceipt(uint256 productId) external {
         Product storage p = products[productId];
         require(msg.sender == p.buyer, "Not the buyer");
@@ -164,7 +164,7 @@ contract ProductMarket {
         frozenBalance[p.buyer] -= p.price;
         registry.recordSale(p.seller);
 
-        payable(p.seller).transfer(p.price);
+        depositBalance[p.seller] += p.price;
         emit ProductCompleted(productId);
     }
 
@@ -176,8 +176,8 @@ contract ProductMarket {
 
         p.status = ProductStatus.Resolved;
         frozenBalance[p.buyer] -= p.price;
-        // 退回托管资金给买家
-        payable(p.buyer).transfer(p.price);
+        // 退回托管资金到买家 deposit
+        depositBalance[p.buyer] += p.price;
         emit ProductDelisted(productId);
     }
 
@@ -238,19 +238,17 @@ contract ProductMarket {
         activeDisputeCount[p.seller]--;
 
         if (buyerWins) {
-            // 买家：退回商品款 + 退回质押
-            payable(p.buyer).transfer(p.price + buyerStakeReturn);
-            // 卖家质押已在 DisputeManager 处理，这里不退
+            // 买家：商品款 + 质押退回 → deposit
+            depositBalance[p.buyer] += p.price + buyerStakeReturn;
             if (sellerStakeReturn > 0) {
-                payable(p.seller).transfer(sellerStakeReturn);
+                depositBalance[p.seller] += sellerStakeReturn;
             }
         } else {
-            // 卖家：收到商品款 + 退回质押
+            // 卖家：商品款 + 质押退回 → deposit
             registry.recordSale(p.seller);
-            payable(p.seller).transfer(p.price + sellerStakeReturn);
-            // 买家质押已在 DisputeManager 处理，这里不退
+            depositBalance[p.seller] += p.price + sellerStakeReturn;
             if (buyerStakeReturn > 0) {
-                payable(p.buyer).transfer(buyerStakeReturn);
+                depositBalance[p.buyer] += buyerStakeReturn;
             }
         }
     }
@@ -306,6 +304,25 @@ contract ProductMarket {
 
     function getMyDisputes(address party) external view returns (uint256[] memory) {
         return partyDisputes[party];
+    }
+
+    // ── Juror balance helpers (called by DisputeManager only) ──────────────
+
+    // Juror pays stake: deposit → frozen, ETH sent to DisputeManager
+    function jurorStakeFreeze(address juror, uint256 amount) external {
+        require(msg.sender == address(disputeManager), "Only dispute manager");
+        require(depositBalance[juror] >= amount, "Insufficient juror deposit");
+        depositBalance[juror] -= amount;
+        frozenBalance[juror] += amount;
+        (bool sent, ) = address(disputeManager).call{value: amount}("");
+        require(sent, "Transfer to DM failed");
+    }
+
+    // Settle juror balance: deduct frozen, optionally credit deposit
+    function jurorStakeSettle(address juror, uint256 frozenDeduct, uint256 depositCredit) external {
+        require(msg.sender == address(disputeManager), "Only dispute manager");
+        if (frozenDeduct > 0) frozenBalance[juror] -= frozenDeduct;
+        if (depositCredit > 0) depositBalance[juror] += depositCredit;
     }
 
     receive() external payable {}

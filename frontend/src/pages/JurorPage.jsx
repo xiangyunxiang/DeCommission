@@ -256,7 +256,7 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
     try {
       const dm = new ethers.Contract(DISPUTE_MANAGER_ADDRESS, DISPUTE_MANAGER_ABI, signer)
       // 动态押金
-      const tx = await dm.stakeToEnter(disputeId, { value: amountRaw })
+      const tx = await dm.stakeToEnter(disputeId)
       await tx.wait()
       setPhase(disputeId, "staked")
       onTxComplete?.()
@@ -313,20 +313,12 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
   }
 
   // ─── JUROR POOL REGISTRATION PANEL (always rendered) ───────────────────────
-  const renderPoolPanel = () => (
-    <div style={styles.poolPanel}>
-      <div style={styles.poolPanelHeader}>
-        <div>
-          <div style={styles.poolPanelTitle}>⚖️ Juror Pool</div>
-          <div style={styles.poolPanelSub}>
-            {poolSize === null
-              ? "Loading pool info..."
-              : `${poolSize} registered — ${poolSize >= 7 ? "✅ enough for all tiers" : `⚠️ need ${7 - poolSize} more for Tier 3 (up to 7 needed)`}`
-            }
-          </div>
-        </div>
+  const renderRulesPanel = () => (
+    <div style={styles.rulesPanel}>
+      <div style={styles.rulesPanelHeader}>
+        <div style={styles.rulesPanelTitle}>⚖️ Dispute Voting Rules</div>
         {isRegistered
-          ? <div style={styles.registeredBadge}>✅ You are in the pool</div>
+          ? <div style={styles.registeredBadge}>✅ You are a Juror</div>
           : (
             <button
               style={styles.registerBtn}
@@ -338,27 +330,32 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
           )
         }
       </div>
-
-      {/* Pool member list */}
-      {poolMembers.length > 0 && (
-        <div style={styles.poolMemberList}>
-          {poolMembers.map((addr, i) => (
-            <div key={addr} style={styles.poolMemberRow}>
-              <span style={styles.poolMemberIndex}>{i + 1}</span>
-              <span style={styles.poolMemberAddr}>{addr}</span>
-              {addr.toLowerCase() === account?.toLowerCase() && (
-                <span style={styles.youBadge}>You</span>
-              )}
-            </div>
-          ))}
+      <div style={styles.rulesGrid}>
+        <div style={styles.ruleBlock}>
+          <div style={styles.ruleBlockHeader}>Tier 1 — Small</div>
+          <div style={styles.ruleBlockValue}>3 Jurors</div>
+          <div style={styles.ruleBlockCondition}>Order price &lt; 0.5 ETH</div>
+          <div style={styles.ruleBlockDetail}>Juror stake: 0.03 ETH per juror</div>
+          <div style={styles.ruleBlockDetail}>Dispute deposit: 0.05 ETH each party</div>
         </div>
-      )}
-
-      <p style={styles.poolPanelNote}>
-        Jurors are randomly selected for dispute, excluding the buyer and seller.
-        Different order values require different numbers of jurors (3, 5, or 7 in demo).
-        Switch MetaMask accounts and click “Participate as Juror” for each one to fill the pool.
-        Once assigned to a dispute, an certain amount of ETH stake is required to unlock evidence and vote.
+        <div style={styles.ruleBlock}>
+          <div style={{ ...styles.ruleBlockHeader, color: "#82b1ff" }}>Tier 2 — Medium</div>
+          <div style={styles.ruleBlockValue}>5 Jurors</div>
+          <div style={styles.ruleBlockCondition}>0.5 ETH ≤ price &lt; 2 ETH</div>
+          <div style={styles.ruleBlockDetail}>Juror stake: 0.08 ETH per juror</div>
+          <div style={styles.ruleBlockDetail}>Dispute deposit: 0.15 ETH each party</div>
+        </div>
+        <div style={styles.ruleBlock}>
+          <div style={{ ...styles.ruleBlockHeader, color: "#ffc864" }}>Tier 3 — Large</div>
+          <div style={styles.ruleBlockValue}>7 Jurors</div>
+          <div style={styles.ruleBlockCondition}>Price ≥ 2 ETH</div>
+          <div style={styles.ruleBlockDetail}>Juror stake: 0.15 ETH per juror</div>
+          <div style={styles.ruleBlockDetail}>Dispute deposit: 0.30 ETH each party</div>
+        </div>
+      </div>
+      <p style={styles.rulesNote}>
+        Jurors are randomly selected, excluding buyer and seller. Voting is blind — you cannot see others' votes.
+        Majority voters earn their stake back plus a share of the penalty pool. Minority voters forfeit their stake.
       </p>
     </div>
   )
@@ -367,7 +364,7 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
   if (!isEligible) {
     return (
       <div style={styles.page}>
-        {renderPoolPanel()}
+        {renderRulesPanel()}
         {txStatus && <div style={styles.statusBar}>{txStatus}</div>}
         <div style={styles.lockedCard}>
           <div style={styles.lockIcon}>🔒</div>
@@ -429,7 +426,7 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
   return (
     <div style={styles.page}>
 
-      {renderPoolPanel()}
+      {renderRulesPanel()}
 
       {/* Header banner */}
       <div style={styles.jurorHeader}>
@@ -734,17 +731,17 @@ const styles = {
 
   empty: { color: "#555", textAlign: "center", padding: "60px 0", fontSize: "14px", lineHeight: "1.8" },
 
-  // Juror pool registration panel
-  poolPanel: { background: "rgba(168,245,212,0.04)", border: "1px solid rgba(168,245,212,0.18)", borderRadius: "12px", padding: "18px 22px", marginBottom: "20px" },
-  poolPanelHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "16px" },
-  poolPanelTitle: { fontSize: "14px", fontWeight: "700", color: "#a8f5d4", marginBottom: "4px" },
-  poolPanelSub: { fontSize: "12px", color: "#888" },
-  poolPanelNote: { fontSize: "12px", color: "#555", margin: "12px 0 0", lineHeight: "1.7" },
+  // Juror rules panel
+  rulesPanel: { background: "rgba(168,245,212,0.04)", border: "1px solid rgba(168,245,212,0.18)", borderRadius: "12px", padding: "18px 22px", marginBottom: "20px" },
+  rulesPanelHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "14px" },
+  rulesPanelTitle: { fontSize: "14px", fontWeight: "700", color: "#a8f5d4" },
   registeredBadge: { fontSize: "12px", color: "#a8f5d4", background: "rgba(168,245,212,0.08)", border: "1px solid rgba(168,245,212,0.25)", borderRadius: "20px", padding: "6px 14px", whiteSpace: "nowrap" },
   registerBtn: { padding: "9px 18px", background: "#a8f5d4", color: "#0d0d0f", border: "none", borderRadius: "8px", fontSize: "13px", fontWeight: "700", cursor: "pointer", whiteSpace: "nowrap" },
-  poolMemberList: { marginTop: "12px", borderTop: "1px solid rgba(255,255,255,0.05)", paddingTop: "10px", display: "flex", flexDirection: "column", gap: "5px" },
-  poolMemberRow: { display: "flex", alignItems: "center", gap: "10px", fontSize: "12px" },
-  poolMemberIndex: { color: "#555", width: "16px", textAlign: "right", flexShrink: 0 },
-  poolMemberAddr: { color: "#888", fontFamily: "monospace", fontSize: "11px", flex: 1 },
-  youBadge: { fontSize: "10px", color: "#a8f5d4", background: "rgba(168,245,212,0.1)", border: "1px solid rgba(168,245,212,0.2)", borderRadius: "10px", padding: "1px 7px" },
+  rulesGrid: { display: "flex", gap: "12px" },
+  ruleBlock: { flex: 1, background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: "10px", padding: "14px 16px" },
+  ruleBlockHeader: { fontSize: "12px", fontWeight: "700", color: "#a8f5d4", letterSpacing: "0.04em", textTransform: "uppercase", marginBottom: "6px" },
+  ruleBlockValue: { fontSize: "22px", fontWeight: "700", color: "#e8e6de", marginBottom: "4px" },
+  ruleBlockCondition: { fontSize: "12px", color: "#888", marginBottom: "8px" },
+  ruleBlockDetail: { fontSize: "11px", color: "#666", lineHeight: "1.7" },
+  rulesNote: { fontSize: "12px", color: "#555", margin: "14px 0 0", lineHeight: "1.7" },
 }

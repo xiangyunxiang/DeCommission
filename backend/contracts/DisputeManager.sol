@@ -31,7 +31,6 @@ contract DisputeManager {
     // Voting window: jurors must vote within 24 hours of dispute opening
     uint256 public constant VOTING_PERIOD = 1 days;
 
-<<<<<<< HEAD
     // ── Tier thresholds (must stay in sync with ProductMarket.sol) ─────────────
     uint256 public constant TIER1_THRESHOLD = 0.5 ether;
     uint256 public constant TIER2_THRESHOLD = 2   ether;
@@ -39,15 +38,6 @@ contract DisputeManager {
     // ── Juror counts per tier ──────────────────────────────────────────────────
     // Odd numbers ensure no ties within a single tier round (ties still possible
     // due to absent voters, so tie-breaking via re-vote is kept as a safeguard).
-=======
-    // 动态分级参数（按订单金额）
-    // Tier 1 (Small):  price < 1 ETH   → 3 jurors, 0.05 ETH 质押
-    // Tier 2 (Medium): 1 ETH <= price < 5 ETH → 5 jurors, 0.10 ETH 质押
-    // Tier 3 (Large):  price >= 5 ETH  → 7 jurors, 0.20 ETH 质押
-    uint256 public constant TIER1_THRESHOLD = 1 ether;
-    uint256 public constant TIER2_THRESHOLD = 5 ether;
-
->>>>>>> 58ea937 (20260414)
     uint256 public constant TIER1_REVIEWER_COUNT = 3;
     uint256 public constant TIER2_REVIEWER_COUNT = 5;
     uint256 public constant TIER3_REVIEWER_COUNT = 7;
@@ -174,13 +164,12 @@ contract DisputeManager {
 
     /**
      * @notice Assigned juror deposits their stake to gain voting rights.
-     *         The stake is held until the dispute is settled.
+     *         The stake is taken from juror's deposit balance and frozen in ProductMarket.
      */
-    function stakeToEnter(uint256 productId) external payable {
+    function stakeToEnter(uint256 productId) external {
         Dispute storage d = disputes[productId];
         require(!d.resolved, "Already resolved");
         require(block.timestamp < d.deadline, "Voting period ended");
-        require(msg.value == d.reviewerStake, "Incorrect stake amount");
 
         bool isAssigned = false;
         for (uint i = 0; i < d.assignedReviewers.length; i++) {
@@ -188,6 +177,9 @@ contract DisputeManager {
         }
         require(isAssigned, "Not assigned to this dispute");
         require(!d.reviewerInfo[msg.sender].hasStaked, "Already staked");
+
+        // Move juror's deposit → frozen in ProductMarket; ETH sent to this contract
+        market.jurorStakeFreeze(msg.sender, d.reviewerStake);
 
         d.reviewerInfo[msg.sender].hasStaked = true;
         d.stakedReviewerCount++;
@@ -209,7 +201,11 @@ contract DisputeManager {
         d.reviewerInfo[msg.sender].hasStaked = false;
         d.stakedReviewerCount--;
 
-        payable(msg.sender).transfer(d.reviewerStake);
+        // Return ETH to ProductMarket and move frozen → deposit
+        (bool sent, ) = address(market).call{value: d.reviewerStake}("");
+        require(sent, "Transfer to PM failed");
+        market.jurorStakeSettle(msg.sender, d.reviewerStake, d.reviewerStake);
+
         emit ReviewerWithdrew(productId, msg.sender);
     }
 
@@ -279,14 +275,18 @@ contract DisputeManager {
             d.buyerVotes  = 0;
             d.sellerVotes = 0;
 
-            // Refund staked-but-not-voted jurors; carry over voted jurors' stakes
+            // Refund staked-but-not-voted jurors: frozen → deposit via PM
             for (uint i = 0; i < d.assignedReviewers.length; i++) {
                 address r = d.assignedReviewers[i];
                 ReviewerInfo storage ri = d.reviewerInfo[r];
                 if (ri.hasStaked && !ri.hasVoted) {
                     ri.hasStaked = false;
                     d.stakedReviewerCount--;
-                    payable(r).transfer(d.reviewerStake);
+                    {
+                        (bool s, ) = address(market).call{value: d.reviewerStake}("");
+                        require(s, "Transfer to PM failed");
+                    }
+                    market.jurorStakeSettle(r, d.reviewerStake, d.reviewerStake);
                 }
                 ri.hasVoted = false;
                 ri.vote     = Vote.None;
@@ -307,59 +307,61 @@ contract DisputeManager {
         d.buyerWon       = buyerWon;
         Vote winningVote = buyerWon ? Vote.BuyerWins : Vote.SellerWins;
 
-        // Prize pool starts with the losing party's dispute stake
-        uint256 disputeStake = market.getDisputeStakeForPrice(d.orderPrice);
-        uint256 prizePool    = disputeStake;
-
-        // Incorrect-voting jurors' stakes are also forfeited into the prize pool
+        // ── Juror payout: all staked jurors' stakes pooled → split among correct voters
         uint256 correctVoterCount = 0;
+        uint256 totalJurorPool    = 0;
         for (uint i = 0; i < d.assignedReviewers.length; i++) {
-            address r = d.assignedReviewers[i];
-            ReviewerInfo storage ri = d.reviewerInfo[r];
-            if (ri.hasStaked && ri.hasVoted) {
-                if (ri.vote == winningVote) {
+            ReviewerInfo storage ri = d.reviewerInfo[d.assignedReviewers[i]];
+            if (ri.hasStaked) {
+                totalJurorPool += d.reviewerStake;
+                if (ri.hasVoted && ri.vote == winningVote) {
                     correctVoterCount++;
-                } else {
-                    prizePool += d.reviewerStake;
                 }
             }
         }
 
-        // Deduct platform fee
-        uint256 actualPlatformFee = prizePool >= d.platformFee ? d.platformFee : prizePool;
-        platformBalance  += actualPlatformFee;
-        uint256 remaining = prizePool - actualPlatformFee;
-
-        // Reward per correct-voting juror
-        uint256 rewardPerCorrectVoter = (correctVoterCount > 0)
-            ? remaining / correctVoterCount
+        uint256 payoutPerCorrectVoter = (correctVoterCount > 0)
+            ? totalJurorPool / correctVoterCount
             : 0;
 
-        // Distribute juror payouts
+        // Send total correct-voter payout ETH to ProductMarket in one batch
+        uint256 totalJurorPayout = correctVoterCount * payoutPerCorrectVoter;
+        if (totalJurorPayout > 0) {
+            (bool s, ) = address(market).call{value: totalJurorPayout}("");
+            require(s, "Transfer juror payouts to PM failed");
+        }
+
+        // Update frozen/deposit for each juror via ProductMarket
         for (uint i = 0; i < d.assignedReviewers.length; i++) {
             address r = d.assignedReviewers[i];
             ReviewerInfo storage ri = d.reviewerInfo[r];
             if (ri.hasStaked) {
                 if (ri.hasVoted && ri.vote == winningVote) {
-                    // Correct vote: stake returned + reward share
-                    uint256 payout = d.reviewerStake + rewardPerCorrectVoter;
-                    reviewerEarnings[r] += rewardPerCorrectVoter;
-                    payable(r).transfer(payout);
-                } else if (!ri.hasVoted) {
-                    // Staked but did not vote: stake returned, no reward
-                    payable(r).transfer(d.reviewerStake);
+                    // Correct vote: frozen removed, deposit credited with pool share
+                    uint256 reward = payoutPerCorrectVoter > d.reviewerStake
+                        ? payoutPerCorrectVoter - d.reviewerStake : 0;
+                    reviewerEarnings[r] += reward;
+                    market.jurorStakeSettle(r, d.reviewerStake, payoutPerCorrectVoter);
+                } else {
+                    // Incorrect vote or staked-but-not-voted: frozen forfeited
+                    market.jurorStakeSettle(r, d.reviewerStake, 0);
                 }
-                // Incorrect vote: stake forfeited (already added to prizePool above)
             }
         }
 
-        // Send the winning party's returned stake to ProductMarket, which will
-        // bundle it with the commission price and pay the winner in one transfer.
-        (bool sent, ) = address(market).call{value: disputeStake}("");
-        require(sent, "Failed to send stake to market");
+        // ── Party dispute stakes: loser's stake → winner (minus platform fee)
+        uint256 disputeStake = market.getDisputeStakeForPrice(d.orderPrice);
+        uint256 actualPlatformFee = disputeStake >= d.platformFee ? d.platformFee : disputeStake;
+        platformBalance += actualPlatformFee;
+        uint256 winnerStakeReturn = 2 * disputeStake - actualPlatformFee;
 
-        uint256 buyerStakeReturn  = buyerWon ? disputeStake : 0;
-        uint256 sellerStakeReturn = buyerWon ? 0 : disputeStake;
+        {
+            (bool s, ) = address(market).call{value: winnerStakeReturn}("");
+            require(s, "Failed to send stake to market");
+        }
+
+        uint256 buyerStakeReturn  = buyerWon ? winnerStakeReturn : 0;
+        uint256 sellerStakeReturn = buyerWon ? 0 : winnerStakeReturn;
 
         market.resolveByDispute(productId, buyerWon, buyerStakeReturn, sellerStakeReturn);
 

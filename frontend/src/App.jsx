@@ -106,12 +106,12 @@ function App() {
   }, [account, signer])
 
   // Show Juror invite popup once when eligible user connects
-  useEffect(() => {
-    if (account && isJurorEligible && pendingJurorCount > 0) {
-      const t = setTimeout(() => setShowJurorPopup(true), 1200)
-      return () => clearTimeout(t)
-    }
-  }, [account, isJurorEligible])
+  // useEffect(() => {
+  //   if (account && isJurorEligible && pendingJurorCount > 0) {
+  //     const t = setTimeout(() => setShowJurorPopup(true), 1200)
+  //     return () => clearTimeout(t)
+  //   }
+  // }, [account, isJurorEligible])
 
   const checkIfWalletConnected = async () => {
     if (!window.ethereum) return
@@ -278,9 +278,6 @@ function App() {
               </span>
 
               {/* Inline balance display */}
-              <span style={styles.inlineBalance}>
-                Wallet: {walletBalance !== null ? `${walletBalance}` : "—"} ETH
-              </span>
               <span style={{
                 ...styles.inlineBalance,
                 color: contractDeposit !== null && parseFloat(contractDeposit) >= 1
@@ -465,8 +462,6 @@ function GuestPage({ onConnect }) {
       <div style={styles.home}>
         <h1 style={styles.homeTitle}>DeCommission</h1>
         <p style={styles.homeSub}>
-          Decentralized Digital Art Commissioning Platform
-          <br/>
           Decentralized Digital Art Commissioning Platform
           <br/>
           <br/>
