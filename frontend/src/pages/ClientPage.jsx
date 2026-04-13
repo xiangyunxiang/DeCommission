@@ -29,6 +29,7 @@
 import { useState, useEffect } from "react"
 import { ethers } from "ethers"
 import { CONTRACT_ADDRESS, CONTRACT_ABI, DATA_FETCHER_ADDRESS, DATA_FETCHER_ABI } from "../contract/config.js"
+import { uploadJsonToPinata, ipfsGatewayUrl } from "../utils/pinata.js"
 
 // ─── Status labels: (none — mock constants removed) ──────────────────────────
 
@@ -43,7 +44,7 @@ const CLIENT_STATUS = {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-export default function ClientPage({ signer, account }) {
+export default function ClientPage({ signer, account, onTxComplete, contractDeposit }) {
 
   const [activeTab, setActiveTab] = useState("browse")   // browse | create | orders
   const [orderTab, setOrderTab]   = useState("listed")   // listed | ongoing | history
@@ -54,9 +55,13 @@ export default function ClientPage({ signer, account }) {
   const [artists, setArtists] = useState([])
 
   // Live orders fetched from the contract
-  const [myListings, setMyListings] = useState([])
-  const [myOrders, setMyOrders]     = useState([])
-  const [fetchError, setFetchError] = useState(null)
+  const [myListings, setMyListings]       = useState([])
+  const [myOrders, setMyOrders]           = useState([])
+  const [fetchError, setFetchError]       = useState(null)
+  const [depositBal, setDepositBal]       = useState(null)   // BigInt Wei | null
+  const [showDepositBanner, setShowDepositBanner] = useState(true)
+  // deliveryCid -> { watermarkedCid, originalCid } — fetched lazily when orders load
+  const [deliveryMeta, setDeliveryMeta]   = useState({})
 
   // Create Order form state
   const [formData, setFormData] = useState({
@@ -70,13 +75,58 @@ export default function ClientPage({ signer, account }) {
     price: "0.1",
   })
 
+  // Auto-hide deposit banner 5s after deposit is met
+  useEffect(() => {
+    if (depositBal !== null && depositBal >= ethers.parseEther("1")) {
+      setShowDepositBanner(true)
+      const t = setTimeout(() => setShowDepositBanner(false), 5000)
+      return () => clearTimeout(t)
+    } else {
+      setShowDepositBanner(true)
+    }
+  }, [depositBal])
+
   // ── MODULE 2: Load on mount ────────────────────────────────────────────────
   useEffect(() => {
     if (signer) {
       fetchMyOrders()
       fetchArtists()
+      fetchDepositBalance()
     }
   }, [signer])
+
+  // Re-fetch deposit when header deposit/withdraw changes
+  useEffect(() => {
+    if (signer && contractDeposit !== null) fetchDepositBalance()
+  }, [contractDeposit])
+
+  const fetchDepositBalance = async () => {
+    try {
+      const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
+      const bal = await contract.depositBalance(account)
+      setDepositBal(bal)
+    } catch (err) {
+      console.warn("fetchDepositBalance failed:", err.message)
+    }
+  }
+
+  const depositFund = async () => {
+    setLoading(true)
+    setTxStatus("⏳ Depositing 1 ETH as mandatory platform deposit...")
+    try {
+      const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
+      const tx = await contract.deposit({ value: ethers.parseEther("1") })
+      setTxStatus("⏳ Transaction submitted. Waiting for confirmation...")
+      await tx.wait()
+      await fetchDepositBalance()
+      onTxComplete?.()
+      setTxStatus("✅ Deposit successful! You can now create a commission.")
+    } catch (err) {
+      setTxStatus(err.code === 4001 ? "Cancelled." : `❌ ${err.message}`)
+    } finally {
+      setLoading(false)
+    }
+  }
 
   // ── MODULE 2: Auto-refresh order status ─────
   // Covers all state transitions so UI auto-updates without manual refresh.
@@ -138,6 +188,27 @@ export default function ClientPage({ signer, account }) {
     }
   }
 
+  // Fetch delivery metadata JSON { watermarkedCid, originalCid } for an order.
+  // The on-chain deliveryCid now points to this JSON, not the image directly.
+  const fetchDeliveryMeta = async (deliveryCid) => {
+    if (!deliveryCid) return
+    try {
+      const res = await fetch(ipfsGatewayUrl(deliveryCid))
+      if (!res.ok) return
+      const data = await res.json()
+      if (data.watermarkedCid && data.originalCid) {
+        setDeliveryMeta(prev => prev[deliveryCid] ? prev : { ...prev, [deliveryCid]: data })
+      }
+    } catch {
+      // Legacy order or non-JSON CID — silently skip
+    }
+  }
+
+  // Auto-fetch delivery meta whenever the orders list changes
+  useEffect(() => {
+    myOrders.forEach(o => { if (o.deliveryCid) fetchDeliveryMeta(o.deliveryCid) })
+  }, [myOrders])
+
   // ── MODULE 2: Fetch active artists from chain ──────────────────────────────
   // Scans all products to find unique seller addresses + their stats.
   // No dedicated contract getter needed — derived from product history.
@@ -166,11 +237,6 @@ export default function ClientPage({ signer, account }) {
     }
   }
 
-  // ── IPFS download helper ──────────────────────────────────────────────────
-  // Constructs a public IPFS gateway URL from a CID.
-  // In production with Pinata: swap gateway to https://gateway.pinata.cloud/ipfs/
-  const ipfsUrl = (cid) => `https://ipfs.io/ipfs/${cid}`
-
   // ── MODULE 2: Create listing → real contract call ────────────────────────
   const createListing = async (e) => {
     e.preventDefault()
@@ -185,14 +251,8 @@ export default function ClientPage({ signer, account }) {
 
     setLoading(true)
 
-    // ── MODULE 1: Simulate IPFS upload ──────────────────────────────────
-    // In production: upload JSON blob to IPFS via Pinata / web3.storage,
-    // receive a real CID, then pass it to the contract.
-    // For MVP: generate a fake CID after a 1.5s loading animation.
-    setTxStatus("⏳ Packaging requirements and uploading to IPFS (simulated)...")
-
-    await new Promise(r => setTimeout(r, 1500))
-
+    // ── Upload requirements JSON to IPFS via Pinata ───────────────────
+    setTxStatus("⏳ Uploading requirements to IPFS via Pinata...")
     const requirementsPayload = {
       description:  formData.description,
       style:        formData.style,
@@ -202,9 +262,14 @@ export default function ClientPage({ signer, account }) {
       aiTolerance:  formData.aiTolerance,
       revisions:    formData.revisions,
     }
-    // In production: const cid = await uploadToIPFS(JSON.stringify(requirementsPayload))
-    const fakeCID = "QmReq" + Math.random().toString(36).substring(2, 10).toUpperCase()
-    console.log("Requirements payload (would go to IPFS):", requirementsPayload)
+    let cid
+    try {
+      cid = await uploadJsonToPinata(requirementsPayload, `commission-req-${Date.now()}.json`)
+    } catch (err) {
+      setTxStatus(`❌ IPFS upload failed: ${err.message}`)
+      setLoading(false)
+      return
+    }
 
     // ── MODULE 2: Real contract call ─────────────────────────────────────
     setTxStatus("⏳ Waiting for MetaMask confirmation...")
@@ -216,16 +281,17 @@ export default function ClientPage({ signer, account }) {
       // The ETH sent = order escrow amount locked by the contract.
       // ⚠ Ensure the user still has ≥ 1 ETH mandatory deposit after this tx.
       //   The contract enforces this on-chain; the UI just shows a warning.
-      const tx = await contract.createCommission(fakeCID, priceInWei, { value: priceInWei })
+      const tx = await contract.createCommission(cid, priceInWei, { value: priceInWei })
       setTxStatus("⏳ Transaction submitted. Waiting for block confirmation...")
       const receipt = await tx.wait()
+      onTxComplete?.()
 
       // Add to local listing state for immediate UI feedback
       setMyListings(prev => [...prev, {
         id:          Date.now(),
         description: formData.description,
         price:       formData.price,
-        cid:         fakeCID,
+        cid:         cid,
         aiTolerance: formData.aiTolerance,
         revisions:   formData.revisions,
       }])
@@ -258,6 +324,7 @@ export default function ClientPage({ signer, account }) {
       const tx = await contract.confirmReceipt(orderId)
       await tx.wait()
       setMyOrders(prev => prev.map(o => o.id === orderId ? { ...o, status: 3 } : o))
+      onTxComplete?.()
       setTxStatus("✅ Confirmed! Escrowed funds released to Artist.")
       setOrderTab("history")
     } catch (err) {
@@ -278,6 +345,7 @@ export default function ClientPage({ signer, account }) {
       const tx = await contract.raiseDispute(orderId)
       await tx.wait()
       setMyOrders(prev => prev.map(o => o.id === orderId ? { ...o, status: 4 } : o))
+      onTxComplete?.()
       setTxStatus("⚠️ Dispute raised. Funds frozen. Waiting for Jurors' votes...")
     } catch (err) {
       setTxStatus(err.code === 4001 ? "Cancelled." : `❌ ${err.message}`)
@@ -323,8 +391,42 @@ export default function ClientPage({ signer, account }) {
     </div>
   )
 
+  const hasDeposit = depositBal !== null && depositBal >= ethers.parseEther("1")
+
   const renderCreate = () => (
-    <form onSubmit={createListing} style={styles.formCard}>
+    <div>
+      {/* ── Deposit status banner ────────────────────────────────── */}
+      {showDepositBanner && <div style={{
+        ...styles.depositBanner,
+        borderColor: hasDeposit ? "rgba(168,245,212,0.3)" : "rgba(255,200,100,0.35)",
+        background:  hasDeposit ? "rgba(168,245,212,0.05)" : "rgba(255,200,100,0.06)",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          <span style={{ fontSize: "18px" }}>{hasDeposit ? "✅" : "⚠️"}</span>
+          <div>
+            <div style={{ fontSize: "13px", fontWeight: "600", color: hasDeposit ? "#a8f5d4" : "#ffc864" }}>
+              Platform Deposit: {depositBal === null ? "—" : `${ethers.formatEther(depositBal)} ETH`}
+            </div>
+            <div style={{ fontSize: "11px", color: "#888", marginTop: "2px" }}>
+              {hasDeposit
+                ? "Deposit requirement met. You can create commissions."
+                : "You need ≥ 1 ETH deposited before creating a commission."}
+            </div>
+          </div>
+        </div>
+        {!hasDeposit && (
+          <button
+            type="button"
+            style={styles.depositBtn}
+            onClick={depositFund}
+            disabled={loading}
+          >
+            {loading ? "Depositing..." : "Deposit 1 ETH →"}
+          </button>
+        )}
+      </div>}
+
+      <form onSubmit={createListing} style={{ ...styles.formCard, opacity: hasDeposit ? 1 : 0.5, pointerEvents: hasDeposit ? "auto" : "none" }}>
       <h3 style={{ color: "#fff", marginBottom: "4px" }}>New Commission Order</h3>
       <p style={{ fontSize: "12px", color: "#666", marginBottom: "24px" }}>
         All fields below will be packaged as JSON and stored on IPFS.
@@ -432,6 +534,7 @@ export default function ClientPage({ signer, account }) {
         {loading ? "Processing..." : `Pay & List Order (${formData.price} ETH) →`}
       </button>
     </form>
+    </div>
   )
 
   const renderOrders = () => (
@@ -520,7 +623,9 @@ export default function ClientPage({ signer, account }) {
                     {/* IPFS Download Button */}
                     {order.deliveryCid && (
                       <a
-                        href={ipfsUrl(order.deliveryCid)}
+                        href={ipfsGatewayUrl(
+                          deliveryMeta[order.deliveryCid]?.watermarkedCid ?? order.deliveryCid
+                        )}
                         target="_blank"
                         rel="noopener noreferrer"
                         style={styles.downloadBtn}
@@ -573,7 +678,11 @@ export default function ClientPage({ signer, account }) {
                 {order.deliveryCid && (
                   <div style={{ marginTop: "12px", marginBottom: "8px" }}>
                     <a
-                      href={ipfsUrl(order.deliveryCid)}
+                      href={ipfsGatewayUrl(
+                        order.status === 3
+                          ? (deliveryMeta[order.deliveryCid]?.originalCid ?? order.deliveryCid)
+                          : (deliveryMeta[order.deliveryCid]?.watermarkedCid ?? order.deliveryCid)
+                      )}
                       target="_blank"
                       rel="noopener noreferrer"
                       style={{ ...styles.downloadBtn, background: order.status === 3 ? "rgba(168,245,212,0.15)" : styles.downloadBtn.background }}
@@ -655,6 +764,8 @@ const styles = {
 
   // Create form
   formCard: { background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: "14px", padding: "30px" },
+  depositBanner: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", border: "1px solid", borderRadius: "12px", padding: "14px 18px", marginBottom: "16px" },
+  depositBtn: { flexShrink: 0, padding: "9px 18px", background: "rgba(255,200,100,0.12)", border: "1px solid rgba(255,200,100,0.4)", borderRadius: "8px", color: "#ffc864", fontSize: "13px", fontWeight: "700", cursor: "pointer", whiteSpace: "nowrap" },
   label: { display: "block", fontSize: "13px", color: "rgba(232,230,222,0.55)", marginBottom: "6px", marginTop: "18px", fontWeight: "600", letterSpacing: "0.04em", textTransform: "uppercase" },
   input: { width: "100%", padding: "11px 14px", boxSizing: "border-box", background: "rgba(0,0,0,0.25)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "8px", color: "#fff", fontSize: "14px" },
   primaryBtn: { width: "100%", padding: "15px", background: "#a8f5d4", color: "#0d0d0f", border: "none", borderRadius: "8px", fontSize: "15px", fontWeight: "700", cursor: "pointer", marginTop: "24px" },
