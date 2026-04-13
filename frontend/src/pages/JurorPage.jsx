@@ -185,7 +185,10 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
       const initPhase  = {}
       const initChoice = {}
       mapped.forEach(d => {
-        if (d.myHasVoted) {
+        if (d.resolved) {
+          initPhase[d.id]  = "resolved"
+          if (d.myHasVoted) initChoice[d.id] = d.myVote === 1 ? "Client" : "Artist"
+        } else if (d.myHasVoted) {
           initPhase[d.id]  = "voted"
           initChoice[d.id] = d.myVote === 1 ? "Client" : "Artist"
         } else if (d.myHasStaked) {
@@ -405,11 +408,12 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
     if (phase === "abstained") return false
     if (phase === "invited" && isExpired(d.deadlineTs)) return false
     if (phase === "voted") return false
+    if (phase === "resolved") return false
     return true
   }), [disputes, disputePhase, now])
 
   const awaitingCards = useMemo(() =>
-    disputes.filter(d => disputePhase[d.id] === "voted"),
+    disputes.filter(d => disputePhase[d.id] === "voted" || disputePhase[d.id] === "resolved"),
     [disputes, disputePhase]
   )
   const hasNothing = activeCards.length === 0 && awaitingCards.length === 0
@@ -568,24 +572,46 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
                   <div style={styles.metaRow}>
                     <span style={styles.caseId}>Case #{dispute.id}</span>
                     <span style={styles.orderRef}>Order #{dispute.orderId}</span>
-                    <span style={styles.waitingTag}>
-                      ⏳ Waiting for result
-                    </span>
+                    {dispute.resolved ? (
+                      <span style={dispute.buyerWon
+                        ? styles.resultClientTag
+                        : styles.resultArtistTag
+                      }>
+                        {dispute.buyerWon ? "✅ Client Wins" : "✅ Artist Wins"}
+                      </span>
+                    ) : (
+                      <span style={styles.waitingTag}>
+                        ⏳ Waiting for result
+                      </span>
+                    )}
                   </div>
                   <p style={styles.disputeDesc}>{dispute.description}</p>
-                  <p style={styles.voteReceipt}>
-                    Your vote: <strong>Support {voteChoice[dispute.id]}</strong>
-                  </p>
+                  {voteChoice[dispute.id] && (
+                    <p style={styles.voteReceipt}>
+                      Your vote: <strong>Support {voteChoice[dispute.id]}</strong>
+                      {dispute.resolved && (
+                        voteChoice[dispute.id] === (dispute.buyerWon ? "Client" : "Artist")
+                          ? <span style={{ color: "#a8f5d4", marginLeft: "8px" }}>— You were in the majority ✓</span>
+                          : <span style={{ color: "#f09595", marginLeft: "8px" }}>— You were in the minority ✗</span>
+                      )}
+                    </p>
+                  )}
                 </div>
                 <div style={styles.escrowBlock}>
                   <div style={styles.escrowAmount}>{dispute.escrowAmount} ETH</div>
                   <div style={styles.escrowLabel}>in escrow</div>
                 </div>
               </div>
-              <p style={{ fontSize: "12px", color: "#555", marginTop: "4px" }}>
-                Result will be announced once all votes are collected or the round closes.
-                Blind voting. No tally will be shown before the verdict.
-              </p>
+              {dispute.resolved ? (
+                <p style={{ fontSize: "12px", color: "#a8f5d4", marginTop: "4px" }}>
+                  This dispute has been resolved. Stakes have been distributed.
+                </p>
+              ) : (
+                <p style={{ fontSize: "12px", color: "#555", marginTop: "4px" }}>
+                  Result will be announced once all votes are collected or the round closes.
+                  Blind voting. No tally will be shown before the verdict.
+                </p>
+              )}
             </div>
           ))}
         </div>
@@ -636,6 +662,8 @@ const styles = {
   expiredTag:   { fontSize: "12px", color: "#888",    background: "rgba(255,255,255,0.06)", padding: "3px 8px", borderRadius: "6px" },
   stakedTag:    { fontSize: "12px", color: "#a8f5d4", background: "rgba(168,245,212,0.1)", padding: "3px 8px", borderRadius: "6px" },
   waitingTag:   { fontSize: "12px", color: "#EF9F27", background: "rgba(239,159,39,0.08)", padding: "3px 8px", borderRadius: "6px" },
+  resultClientTag: { fontSize: "12px", color: "#a8f5d4", background: "rgba(168,245,212,0.1)", padding: "3px 8px", borderRadius: "6px", fontWeight: "600" },
+  resultArtistTag: { fontSize: "12px", color: "#82b1ff", background: "rgba(130,177,255,0.1)", padding: "3px 8px", borderRadius: "6px", fontWeight: "600" },
 
   // AI tag
   aiTagPass: { 

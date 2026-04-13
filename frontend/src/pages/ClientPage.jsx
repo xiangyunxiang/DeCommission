@@ -44,7 +44,7 @@ const CLIENT_STATUS = {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-export default function ClientPage({ signer, account, onTxComplete }) {
+export default function ClientPage({ signer, account, onTxComplete, contractDeposit }) {
 
   const [activeTab, setActiveTab] = useState("browse")   // browse | create | orders
   const [orderTab, setOrderTab]   = useState("listed")   // listed | ongoing | history
@@ -59,6 +59,7 @@ export default function ClientPage({ signer, account, onTxComplete }) {
   const [myOrders, setMyOrders]           = useState([])
   const [fetchError, setFetchError]       = useState(null)
   const [depositBal, setDepositBal]       = useState(null)   // BigInt Wei | null
+  const [showDepositBanner, setShowDepositBanner] = useState(true)
   // deliveryCid -> { watermarkedCid, originalCid } — fetched lazily when orders load
   const [deliveryMeta, setDeliveryMeta]   = useState({})
 
@@ -74,6 +75,17 @@ export default function ClientPage({ signer, account, onTxComplete }) {
     price: "0.1",
   })
 
+  // Auto-hide deposit banner 5s after deposit is met
+  useEffect(() => {
+    if (depositBal !== null && depositBal >= ethers.parseEther("1")) {
+      setShowDepositBanner(true)
+      const t = setTimeout(() => setShowDepositBanner(false), 5000)
+      return () => clearTimeout(t)
+    } else {
+      setShowDepositBanner(true)
+    }
+  }, [depositBal])
+
   // ── MODULE 2: Load on mount ────────────────────────────────────────────────
   useEffect(() => {
     if (signer) {
@@ -82,6 +94,11 @@ export default function ClientPage({ signer, account, onTxComplete }) {
       fetchDepositBalance()
     }
   }, [signer])
+
+  // Re-fetch deposit when header deposit/withdraw changes
+  useEffect(() => {
+    if (signer && contractDeposit !== null) fetchDepositBalance()
+  }, [contractDeposit])
 
   const fetchDepositBalance = async () => {
     try {
@@ -379,7 +396,7 @@ export default function ClientPage({ signer, account, onTxComplete }) {
   const renderCreate = () => (
     <div>
       {/* ── Deposit status banner ────────────────────────────────── */}
-      <div style={{
+      {showDepositBanner && <div style={{
         ...styles.depositBanner,
         borderColor: hasDeposit ? "rgba(168,245,212,0.3)" : "rgba(255,200,100,0.35)",
         background:  hasDeposit ? "rgba(168,245,212,0.05)" : "rgba(255,200,100,0.06)",
@@ -407,7 +424,7 @@ export default function ClientPage({ signer, account, onTxComplete }) {
             {loading ? "Depositing..." : "Deposit 1 ETH →"}
           </button>
         )}
-      </div>
+      </div>}
 
       <form onSubmit={createListing} style={{ ...styles.formCard, opacity: hasDeposit ? 1 : 0.5, pointerEvents: hasDeposit ? "auto" : "none" }}>
       <h3 style={{ color: "#fff", marginBottom: "4px" }}>New Commission Order</h3>

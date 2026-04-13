@@ -225,6 +225,20 @@ contract DisputeManager {
         }
 
         emit VoteCast(productId, msg.sender, vote);
+
+        // Auto-settle if all assigned reviewers have voted
+        if (_allVoted(productId)) {
+            _settle(productId);
+        }
+    }
+
+    // ── Check whether every assigned reviewer has voted ───────────
+    function _allVoted(uint256 productId) internal view returns (bool) {
+        Dispute storage d = disputes[productId];
+        for (uint i = 0; i < d.assignedReviewers.length; i++) {
+            if (!d.reviewerInfo[d.assignedReviewers[i]].hasVoted) return false;
+        }
+        return true;
     }
 
     /**
@@ -238,7 +252,16 @@ contract DisputeManager {
     function settleDispute(uint256 productId) external {
         Dispute storage d = disputes[productId];
         require(!d.resolved, "Already resolved");
-        require(block.timestamp >= d.deadline, "Voting still ongoing");
+        require(
+            block.timestamp >= d.deadline || _allVoted(productId),
+            "Voting still ongoing"
+        );
+        _settle(productId);
+    }
+
+    function _settle(uint256 productId) internal {
+        Dispute storage d = disputes[productId];
+        require(!d.resolved, "Already resolved");
 
         // ── Tie: start a new voting round ─────────────────────────────────────
         if (d.buyerVotes == d.sellerVotes) {
@@ -332,8 +355,8 @@ contract DisputeManager {
 
         emit DisputeResolved(productId, buyerWon, d.buyerVotes, d.sellerVotes);
     }
-
-    // ── Platform fee withdrawal (add ownership control before production) ─────
+    // ── 平台提款 ──────────────────────────────────────────────────
+    // demo 用，实际应该加 owner 权限控制
     function withdrawPlatformFee(address to) external {
         uint256 amount = platformBalance;
         platformBalance = 0;

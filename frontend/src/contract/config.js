@@ -41,6 +41,7 @@ export const CONTRACT_ABI = [
   "function getListedProducts() view returns (uint256[])",
   "function getLatestProductId() view returns (uint256)",
   "function depositBalance(address) view returns (uint256)",
+  "function frozenBalance(address) view returns (uint256)",
 
   // ── Events ─────────────────────────────────────────────────────
 
@@ -62,7 +63,7 @@ export const DISPUTE_MANAGER_ABI = [
 
   // ── Read functions ─────────────────────────────────────────────
   "function getDisputesByReviewer(address reviewer) view returns (uint256[])",
-  "function getReviewerDisputeDetails(address reviewer) view returns (tuple(uint256 productId, address buyer, address seller, uint256 buyerVotes, uint256 sellerVotes, uint256 deadline, bool resolved, bool buyerWon, uint8 myVote, bool myHasStaked, bool myHasVoted)[])",
+  "function getReviewerDisputeDetails(address reviewer) view returns (tuple(uint256 productId, address buyer, address seller, uint256 orderPrice, uint256 reviewerCount, uint256 reviewerStake, uint256 buyerVotes, uint256 sellerVotes, uint256 deadline, bool resolved, bool buyerWon, uint8 myVote, bool myHasStaked, bool myHasVoted)[])",
   "function getDisputeInfo(uint256 productId) view returns (address[] assignedReviewers, uint256 buyerVotes, uint256 sellerVotes, uint256 deadline, bool resolved, bool buyerWon)",
   "function getReviewerStakeStatus(uint256 productId, address reviewer) view returns (bool hasStaked, bool hasVoted)",
 

@@ -47,6 +47,7 @@ contract ProductMarket {
     mapping(uint256 => Product) public products;
     mapping(address => uint256[]) private partyDisputes;
     mapping(address => uint256) public depositBalance;
+    mapping(address => uint256) public frozenBalance;      // 买家下单后冻结的托管资金
     mapping(address => uint256) public activeDisputeCount; // 有多少活跃争议，提款时用
 
     event CommissionCreated(uint256 indexed id, address indexed buyer, string ipfsHash, uint256 price);
@@ -122,6 +123,8 @@ contract ProductMarket {
             status: ProductStatus.Listed
         });
 
+        frozenBalance[msg.sender] += price;
+
         emit CommissionCreated(productCounter, msg.sender, ipfsHash, price);
         return productCounter;
     }
@@ -158,6 +161,7 @@ contract ProductMarket {
         require(p.status == ProductStatus.Shipped, "Not shipped yet");
 
         p.status = ProductStatus.Completed;
+        frozenBalance[p.buyer] -= p.price;
         registry.recordSale(p.seller);
 
         payable(p.seller).transfer(p.price);
@@ -171,6 +175,7 @@ contract ProductMarket {
         require(p.status == ProductStatus.Listed, "Cannot cancel after acceptance");
 
         p.status = ProductStatus.Resolved;
+        frozenBalance[p.buyer] -= p.price;
         // 退回托管资金给买家
         payable(p.buyer).transfer(p.price);
         emit ProductDelisted(productId);
@@ -226,6 +231,7 @@ contract ProductMarket {
         require(p.status == ProductStatus.Disputed, "Not in dispute");
 
         p.status = ProductStatus.Resolved;
+        frozenBalance[p.buyer] -= p.price;
 
         // 归还活跃争议计数
         activeDisputeCount[p.buyer]--;
