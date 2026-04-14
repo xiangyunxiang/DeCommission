@@ -48,6 +48,7 @@ import { useState, useEffect, useMemo } from "react"
 import { ethers } from "ethers"
 import { CONTRACT_ADDRESS, CONTRACT_ABI, DISPUTE_MANAGER_ADDRESS, DISPUTE_MANAGER_ABI,
          REVIEWER_REGISTRY_ADDRESS, REVIEWER_REGISTRY_ABI } from "../contract/config.js"
+import { ipfsGatewayUrl } from "../utils/pinata.js"
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -69,6 +70,9 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
   const [loading, setLoading]   = useState(false)
   const [txStatus, setTxStatus] = useState("")
   const [now, setNow]           = useState(Date.now())
+
+  // deliveryCid -> { watermarkedCid, originalCid } — fetched lazily from IPFS JSON
+  const [deliveryMeta, setDeliveryMeta] = useState({})
 
   // Juror pool registration state
   const [isRegistered, setIsRegistered] = useState(false)
@@ -206,6 +210,29 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
       setLoading(false)
     }
   }
+
+  // Fetch delivery metadata JSON { watermarkedCid, originalCid } for a dispute.
+  // The on-chain deliveryIpfsHash now points to this JSON envelope, not the image directly.
+  const fetchDeliveryMeta = async (deliveryCid) => {
+    if (!deliveryCid || deliveryMeta[deliveryCid]) return
+    try {
+      const res = await fetch(ipfsGatewayUrl(deliveryCid))
+      if (!res.ok) return
+      const data = await res.json()
+      if (data.watermarkedCid && data.originalCid) {
+        setDeliveryMeta(prev => prev[deliveryCid] ? prev : { ...prev, [deliveryCid]: data })
+      }
+    } catch {
+      // Legacy order or non-JSON CID — silently skip
+    }
+  }
+
+  // Auto-fetch delivery meta whenever disputes list changes
+  useEffect(() => {
+    disputes.forEach(d => {
+      if (d.evidenceCids.watermarkedWork) fetchDeliveryMeta(d.evidenceCids.watermarkedWork)
+    })
+  }, [disputes])
 
   // ── MODULE: Auto-refresh Dispute State ─────
   useEffect(() => {
@@ -504,7 +531,13 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
                   {isOpen ? "Hide Evidence ↑" : "Phase 2: View Evidence Files ↓"}
                 </button>
 
-                {isOpen && (
+                {isOpen && (() => {
+                  const reqCid = dispute.evidenceCids.requirementsCid
+                  const rawDeliveryCid = dispute.evidenceCids.watermarkedWork
+                  const meta = rawDeliveryCid ? deliveryMeta[rawDeliveryCid] : null
+                  // Prefer resolved watermarkedCid from delivery JSON; fall back to raw CID
+                  const watermarkedCid = meta?.watermarkedCid ?? rawDeliveryCid
+                  return (
                   <div style={styles.evidenceBox}>
                     <p style={styles.evidenceNote}>
                       The following IPFS CIDs grant you temporary access to dispute evidence.<br/>
@@ -512,18 +545,70 @@ export default function JurorPage({ signer, account, completedCount, onPendingCo
                     </p>
                     <div style={styles.cidRow}>
                       <span style={styles.cidLabel}>Requirements CID:</span>
-                      <span style={styles.cidValue}>{dispute.evidenceCids.requirementsCid ?? "Not available"}</span>
+                      {reqCid ? (
+                        <a
+                          href={ipfsGatewayUrl(reqCid)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={styles.cidLink}
+                        >
+                          {reqCid}
+                        </a>
+                      ) : (
+                        <span style={styles.cidValue}>Not available</span>
+                      )}
                     </div>
                     <div style={styles.cidRow}>
                       <span style={styles.cidLabel}>Watermarked delivery:</span>
-                      <span style={styles.cidValue}>{dispute.evidenceCids.watermarkedWork ?? "Not submitted yet"}</span>
+                      {watermarkedCid ? (
+                        <a
+                          href={ipfsGatewayUrl(watermarkedCid)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={styles.cidLink}
+                        >
+                          {watermarkedCid}
+                        </a>
+                      ) : (
+                        <span style={styles.cidValue}>Not submitted yet</span>
+                      )}
                     </div>
+
+                    {/* Inline watermarked image preview */}
+                    {watermarkedCid && (
+                      <div style={styles.previewSection}>
+                        <div style={styles.previewLabel}>🖼 Watermarked Artwork Preview</div>
+                        <a
+                          href={ipfsGatewayUrl(watermarkedCid)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={styles.previewLink}
+                        >
+                          <img
+                            src={ipfsGatewayUrl(watermarkedCid)}
+                            alt="Watermarked delivery preview"
+                            style={styles.previewImg}
+                            onError={e => { e.target.style.display = 'none' }}
+                          />
+                        </a>
+                        <a
+                          href={ipfsGatewayUrl(watermarkedCid)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={styles.openFullBtn}
+                        >
+                          🔍 Open Full Image in New Tab ↗
+                        </a>
+                      </div>
+                    )}
+
                     <div style={styles.blindReminder}>
                       🔒 Blind voting is enforced. Vote counts and other Jurors' choices are hidden
                       until the outcome is released.
                     </div>
                   </div>
-                )}
+                  )
+                })()}
 
                 {/* Vote buttons */}
                 {!expired ? (
@@ -713,7 +798,15 @@ const styles = {
   cidRow: { display: "flex", gap: "10px", marginBottom: "6px", flexWrap: "wrap" },
   cidLabel: { fontSize: "11px", color: "#666", minWidth: "160px" },
   cidValue: { fontSize: "11px", color: "#a8f5d4", fontFamily: "monospace" },
+  cidLink: { fontSize: "11px", color: "#a8f5d4", fontFamily: "monospace", textDecoration: "none", borderBottom: "1px dashed rgba(168,245,212,0.4)", transition: "color 0.2s, border-color 0.2s", cursor: "pointer", wordBreak: "break-all" },
   blindVotingReminder: { fontSize: "12px", color: "#EF9F27", marginTop: "10px", padding: "8px 12px", background: "rgba(239,159,39,0.06)", borderRadius: "6px" },
+
+  // Watermarked image preview
+  previewSection: { marginTop: "14px", padding: "14px", background: "rgba(168,245,212,0.03)", border: "1px solid rgba(168,245,212,0.12)", borderRadius: "10px" },
+  previewLabel: { fontSize: "12px", fontWeight: "700", color: "#a8f5d4", letterSpacing: "0.03em", marginBottom: "10px" },
+  previewLink: { display: "block", textDecoration: "none" },
+  previewImg: { maxWidth: "100%", maxHeight: "400px", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.08)", objectFit: "contain", display: "block", margin: "0 auto" },
+  openFullBtn: { display: "block", width: "100%", padding: "9px", marginTop: "10px", background: "rgba(168,245,212,0.07)", border: "1px solid rgba(168,245,212,0.2)", borderRadius: "8px", color: "#a8f5d4", fontSize: "12px", textAlign: "center", textDecoration: "none", cursor: "pointer" },
 
   // Vote
   voteSection: { marginTop: "14px" },
